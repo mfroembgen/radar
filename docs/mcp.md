@@ -55,7 +55,6 @@ auth:
   mode: oidc
   oidc:
     issuerURL: https://identity.example.com
-    scopes: [openid, profile, email]
     clientID: your-client-id
     existingSecret: radar-oidc-credentials
     clientSecretKey: client-secret
