@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -110,14 +111,6 @@ func mcpSecureURL(u *url.URL) bool {
 	return u.Scheme == "http" && (u.Hostname() == "localhost" || (ip != nil && ip.IsLoopback()))
 }
 
-// Issuer returns the public issuer derived from the configured OIDC callback.
-func (s *MCPOAuthServer) Issuer() string { return s.issuer }
-
-// MetadataPath returns the origin-relative RFC 8414 discovery path.
-func (s *MCPOAuthServer) MetadataPath() string {
-	return "/.well-known/oauth-authorization-server" + s.basePath
-}
-
 func (s *MCPOAuthServer) HandleMetadata(w http.ResponseWriter, r *http.Request) {
 	mcpJSON(w, http.StatusOK, map[string]any{
 		"issuer": s.issuer, "authorization_endpoint": s.issuer + "/auth/mcp/authorize",
@@ -151,7 +144,16 @@ func (s *MCPOAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) 
 	r.Body = http.MaxBytesReader(w, r.Body, 8192)
 	var client mcpClient
 	d := json.NewDecoder(r.Body)
-	if d.Decode(&client) != nil || d.Decode(new(any)) != io.EOF || len(client.RedirectURIs) == 0 || len(client.RedirectURIs) > 10 || len(client.Name) > 100 {
+	err := d.Decode(&client)
+	if err == nil {
+		err = d.Decode(new(any))
+	}
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		mcpError(w, http.StatusRequestEntityTooLarge, "invalid_client_metadata")
+		return
+	}
+	if err != io.EOF || len(client.RedirectURIs) == 0 || len(client.RedirectURIs) > 10 || len(client.Name) > 100 {
 		mcpError(w, 400, "invalid_client_metadata")
 		return
 	}
@@ -213,7 +215,8 @@ var mcpConsentTemplate = template.Must(template.New("consent").Parse(`<!doctype 
 // HandleAuthorize validates authorization requests and requires explicit browser consent.
 func (s *MCPOAuthServer) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 	mcpPrivateHeaders(w)
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+	// A form-action restriction also blocks redirects to the client's OAuth callback.
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	if r.Method == http.MethodPost {
@@ -288,8 +291,11 @@ func (s *MCPOAuthServer) HandleAuthorize(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *MCPOAuthServer) consent(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("Origin") != s.origin || !mcpParseForm(w, r) {
+	if r.Header.Get("Origin") != s.origin {
 		mcpError(w, 400, "invalid_request")
+		return
+	}
+	if !mcpParseForm(w, r) {
 		return
 	}
 	session := s.browserSession(r)
@@ -354,7 +360,10 @@ func (s *MCPOAuthServer) browserSession(r *http.Request) *Session {
 
 // HandleToken exchanges one-time codes or rotates refresh tokens.
 func (s *MCPOAuthServer) HandleToken(w http.ResponseWriter, r *http.Request) {
-	if !mcpParseForm(w, r) || r.Header.Get("Authorization") != "" {
+	if !mcpParseForm(w, r) {
+		return
+	}
+	if r.Header.Get("Authorization") != "" {
 		mcpError(w, 400, "invalid_request")
 		return
 	}
@@ -424,7 +433,10 @@ func (s *MCPOAuthServer) HandleToken(w http.ResponseWriter, r *http.Request) {
 
 // HandleRevoke invalidates the entire authorization grant containing a token.
 func (s *MCPOAuthServer) HandleRevoke(w http.ResponseWriter, r *http.Request) {
-	if !mcpParseForm(w, r) || r.Header.Get("Authorization") != "" {
+	if !mcpParseForm(w, r) {
+		return
+	}
+	if r.Header.Get("Authorization") != "" {
 		mcpError(w, 400, "invalid_request")
 		return
 	}
@@ -568,10 +580,21 @@ func (s *MCPOAuthServer) prune() {
 
 func mcpParseForm(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodPost || strings.Split(r.Header.Get("Content-Type"), ";")[0] != "application/x-www-form-urlencoded" {
+		mcpError(w, 400, "invalid_request")
 		return false
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 8192)
-	return r.ParseForm() == nil && mcpSingleValues(r.PostForm)
+	err := r.ParseForm()
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		mcpError(w, http.StatusRequestEntityTooLarge, "invalid_request")
+		return false
+	}
+	if err != nil || !mcpSingleValues(r.PostForm) {
+		mcpError(w, 400, "invalid_request")
+		return false
+	}
+	return true
 }
 
 func mcpSingleValues(values url.Values) bool {
