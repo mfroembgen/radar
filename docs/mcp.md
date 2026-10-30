@@ -231,7 +231,7 @@ Configure the OIDC client and Kubernetes permissions as described in [Authentica
 
 Connect the client to `https://radar.example.com/mcp`, or `https://radar.example.com/mcp-readonly` for the read-only tool catalog. Use the client's native MCP sign-in flow. Radar shows a consent screen identifying the client and requested endpoint after browser login. Tokens are restricted to the exact endpoint authorized: a token for `/mcp-readonly` cannot access `/mcp`, and MCP tokens do not grant access to the web API. Both endpoints retain per-user Kubernetes RBAC enforcement.
 
-The client must support MCP OAuth discovery, dynamic registration of public clients, authorization code flow with S256 PKCE, and resource indicators. Request the advertised `mcp` scope in the client’s scope settings. Client support varies by version; a client that only supports static headers cannot complete this browser flow. Browser-session authentication remains available for existing integrations.
+The client must support MCP OAuth discovery, dynamic registration of public clients, authorization code flow with S256 PKCE, and resource indicators. Request the advertised `mcp` scope in the client’s scope settings. Redirect URIs must use HTTPS or HTTP loopback URLs; private-use schemes are not supported. Loopback IP callbacks may use an ephemeral port. Client support varies by version; a client that only supports static headers cannot complete this browser flow. Browser-session authentication remains available for existing integrations.
 
 ### Discovery and ingress
 
@@ -249,7 +249,7 @@ Ensure your ingress routes the advertised `/.well-known/*` paths and `/auth/*` p
 
 - MCP OAuth is opt-in and requires standalone `auth.mode: oidc` with MCP enabled. Proxy auth, unauthenticated mode and Radar Cloud do not support this option.
 - Access tokens expire after 10 minutes. Refreshing replaces both tokens and invalidates the previous access token. Refresh tokens expire at an absolute 24-hour session limit; reusing any old refresh token during that lifetime revokes its token family. Each grant occupies one access-token and one refresh-token slot, regardless of rotation count. The client must authorize again when its grant expires or is revoked.
-- Dynamic registration accepts at most 20 valid registrations per minute per Radar process; malformed requests do not consume this shared capacity limit. Complete initial authorization within 10 minutes; approved client registrations last 30 days and are renewed on consent.
+- Dynamic registration accepts at most 20 valid registrations per minute per Radar process; malformed requests do not consume this shared capacity limit. Each client can have at most eight pending authorization requests. Complete initial authorization within 10 minutes; approved client registrations last 30 days and are renewed on consent.
 - Client registrations, authorization requests and tokens are bounded, in-memory state. Run exactly one replica. The chart uses `Recreate` rollouts to avoid routing requests across independent stores. Pod restarts invalidate this state even when browser session signing keys or timeline storage persist: reconnect the MCP client, re-register it and authorize again. If the client caches a stale client ID, remove and re-add its Radar server configuration.
 
 ## Catalog Introspection

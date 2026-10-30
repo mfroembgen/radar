@@ -14,7 +14,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 	}
 	mcp := s.mcpOAuth.Authenticate(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/mcp" || (r.URL.Path == "/mcp-readonly" && s.mcpReadOnlyHandler != nil) {
+		if (r.URL.Path == "/mcp" && s.mcpHandler != nil) || (r.URL.Path == "/mcp-readonly" && s.mcpReadOnlyHandler != nil) {
 			mcp.ServeHTTP(w, r)
 			return
 		}
@@ -24,8 +24,12 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 
 func (s *Server) mountMCPOAuthMetadata(r chi.Router, prefix string) {
 	r.Get("/.well-known/oauth-authorization-server"+prefix, s.mcpOAuth.HandleMetadata)
+	// The SDK uses this fallback when ingress exposes only the issuer prefix.
 	r.Get("/.well-known/openid-configuration"+prefix, s.mcpOAuth.HandleMetadata)
 	for _, resource := range []string{"/mcp", "/mcp-readonly"} {
+		if resource == "/mcp" && s.mcpHandler == nil {
+			continue
+		}
 		if resource == "/mcp-readonly" && s.mcpReadOnlyHandler == nil {
 			continue
 		}

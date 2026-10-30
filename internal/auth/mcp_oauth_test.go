@@ -594,3 +594,61 @@ func TestMCPOAuthConsentEscapesClientMetadata(t *testing.T) {
 		t.Fatal("unsafe consent rendering")
 	}
 }
+func TestMCPOAuthPendingRequestsCannotMonopolizeCapacity(t *testing.T) {
+	f := newMCPOAuthFixture(t)
+	for i := 0; i < 8; i++ {
+		if page := f.authorize(f.request("/mcp-readonly"), nil); page.Code != http.StatusFound {
+			t.Fatalf("pending request %d: %d", i, page.Code)
+		}
+	}
+	if page := f.authorize(f.request("/mcp-readonly"), nil); page.Code != http.StatusTooManyRequests {
+		t.Fatalf("busy client: %d, want 429", page.Code)
+	}
+	registered := httptest.NewRecorder()
+	f.s.HandleRegister(registered, httptest.NewRequest(http.MethodPost, "/auth/mcp/register", strings.NewReader(`{"redirect_uris":["http://127.0.0.1:54321/callback"]}`)))
+	if registered.Code != http.StatusCreated {
+		t.Fatalf("second client registration: %d", registered.Code)
+	}
+	var other mcpClient
+	if err := json.Unmarshal(registered.Body.Bytes(), &other); err != nil {
+		t.Fatal(err)
+	}
+	query := f.request("/mcp-readonly")
+	query.Set("client_id", other.ID)
+	if page := f.authorize(query, f.cookies); page.Code != http.StatusOK {
+		t.Fatalf("other client blocked: %d %s", page.Code, page.Body)
+	}
+}
+
+func TestMCPOAuthLoopbackCallbackPortMayChange(t *testing.T) {
+	for _, tc := range []struct {
+		redirect string
+		want     int
+	}{
+		{"http://127.0.0.1:54322/callback", http.StatusOK},
+		{"http://127.0.0.1/callback", http.StatusOK},
+		{"http://127.0.0.2:54322/callback", http.StatusBadRequest},
+		{"http://127.0.0.1:54322/other", http.StatusBadRequest},
+		{"http://127.0.0.1:54322/callback?other=1", http.StatusBadRequest},
+		{"https://127.0.0.1:54322/callback", http.StatusBadRequest},
+	} {
+		t.Run(tc.redirect, func(t *testing.T) {
+			f := newMCPOAuthFixture(t)
+			query := f.request("/mcp-readonly")
+			query.Set("redirect_uri", tc.redirect)
+			if page := f.authorize(query, f.cookies); page.Code != tc.want {
+				t.Fatalf("redirect: %d, want %d", page.Code, tc.want)
+			}
+		})
+	}
+}
+
+func TestMCPOAuthConsentAcceptsEquivalentBrowserOrigin(t *testing.T) {
+	f := newMCPOAuthFixture(t)
+	f.s.origin = "https://RADAR.EXAMPLE:443"
+	page := f.authorize(f.request("/mcp-readonly"), f.cookies)
+	result := f.consent(page, f.consentForm(page), "https://radar.example", f.cookies)
+	if result.Code != http.StatusSeeOther {
+		t.Fatalf("equivalent browser origin: %d %s", result.Code, result.Body)
+	}
+}

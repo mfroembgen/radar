@@ -24,12 +24,17 @@ import (
 
 func TestMCPOAuthSDKIntegration(t *testing.T) {
 	for _, deployment := range []struct {
-		basePath   string
-		prefixOnly bool
-	}{{}, {basePath: "/tools/radar"}, {basePath: "/tools/radar", prefixOnly: true}} {
+		basePath     string
+		prefixOnly   bool
+		readOnlyOnly bool
+	}{{}, {basePath: "/tools/radar"}, {basePath: "/tools/radar", prefixOnly: true}, {readOnlyOnly: true}} {
 		basePath := deployment.basePath
-		for _, resourcePath := range []string{"/mcp", "/mcp-readonly"} {
-			t.Run(fmt.Sprintf("%s%s/prefixOnly=%t", basePath, resourcePath, deployment.prefixOnly), func(t *testing.T) {
+		resources := []string{"/mcp", "/mcp-readonly"}
+		if deployment.readOnlyOnly {
+			resources = []string{"/mcp-readonly"}
+		}
+		for _, resourcePath := range resources {
+			t.Run(fmt.Sprintf("%s%s/prefixOnly=%t/readOnlyOnly=%t", basePath, resourcePath, deployment.prefixOnly, deployment.readOnlyOnly), func(t *testing.T) {
 				t.Setenv("RADAR_CLOUD_MODE", "false")
 				router := chi.NewRouter()
 				httpServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,7 +50,7 @@ func TestMCPOAuthSDKIntegration(t *testing.T) {
 					OIDCRedirectURL: httpServer.URL + basePath + "/auth/callback",
 				}
 				cfg.Defaults()
-				oauthServer, err := auth.NewMCPOAuthServer(cfg, basePath, []string{"/mcp", "/mcp-readonly"})
+				oauthServer, err := auth.NewMCPOAuthServer(cfg, basePath, resources)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -59,6 +64,9 @@ func TestMCPOAuthSDKIntegration(t *testing.T) {
 				})
 				handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return mcpServer }, &mcp.StreamableHTTPOptions{Stateless: true})
 				s := &Server{router: router, basePath: basePath, authConfig: cfg, mcpOAuth: oauthServer, mcpHandler: handler, mcpReadOnlyHandler: handler}
+				if deployment.readOnlyOnly {
+					s.mcpHandler = nil
+				}
 				s.setupRoutes()
 
 				browser := &http.Client{Transport: httpServer.Client().Transport}

@@ -18,15 +18,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/skyhook-io/radar/pkg/urlutil"
 )
 
 const (
-	mcpAccessTTL     = 10 * time.Minute
-	mcpGrantTTL      = 24 * time.Hour
-	mcpPendingTTL    = 10 * time.Minute
-	mcpClientTTL     = 30 * 24 * time.Hour
-	mcpStoreLimit    = 4096
-	mcpConsentCookie = "radar_mcp_consent_"
+	mcpAccessTTL        = 10 * time.Minute
+	mcpGrantTTL         = 24 * time.Hour
+	mcpPendingTTL       = 10 * time.Minute
+	mcpClientTTL        = 30 * 24 * time.Hour
+	mcpStoreLimit       = 4096
+	mcpPendingPerClient = 8
+	mcpConsentCookie    = "radar_mcp_consent_"
 )
 
 type mcpClient struct {
@@ -109,6 +112,28 @@ func mcpSecureURL(u *url.URL) bool {
 	}
 	ip := net.ParseIP(u.Hostname())
 	return u.Scheme == "http" && (u.Hostname() == "localhost" || (ip != nil && ip.IsLoopback()))
+}
+
+// Native loopback callbacks may choose a new ephemeral port (RFC 8252 section 7.3).
+func mcpRedirectAllowed(registered []string, raw string) bool {
+	if slices.Contains(registered, raw) {
+		return true
+	}
+	requested, err := url.Parse(raw)
+	if err != nil || requested.Scheme != "http" || !mcpSecureURL(requested) {
+		return false
+	}
+	for _, value := range registered {
+		allowed, err := url.Parse(value)
+		if err != nil || allowed.Scheme != requested.Scheme || allowed.Hostname() != requested.Hostname() {
+			continue
+		}
+		allowed.Host = requested.Host
+		if allowed.String() == requested.String() {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *MCPOAuthServer) HandleMetadata(w http.ResponseWriter, r *http.Request) {
@@ -218,7 +243,8 @@ func (s *MCPOAuthServer) HandleAuthorize(w http.ResponseWriter, r *http.Request)
 	// A form-action restriction also blocks redirects to the client's OAuth callback.
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
 	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Referrer-Policy", "no-referrer")
+	// Preserve Origin on the same-origin form POST while hiding cross-origin referrers.
+	w.Header().Set("Referrer-Policy", "same-origin")
 	if r.Method == http.MethodPost {
 		s.consent(w, r)
 		return
@@ -241,11 +267,22 @@ func (s *MCPOAuthServer) HandleAuthorize(w http.ResponseWriter, r *http.Request)
 	} else {
 		client, ok := s.clients[q.Get("client_id")]
 		challenge, err := base64.RawURLEncoding.DecodeString(q.Get("code_challenge"))
-		if !ok || !slices.Contains(client.RedirectURIs, q.Get("redirect_uri")) || q.Get("response_type") != "code" ||
+		if !ok || !mcpRedirectAllowed(client.RedirectURIs, q.Get("redirect_uri")) || q.Get("response_type") != "code" ||
 			q.Get("code_challenge_method") != "S256" || err != nil || len(challenge) != 32 || !s.validResource(q.Get("resource")) ||
 			(q.Get("scope") != "" && q.Get("scope") != "mcp") {
 			s.mu.Unlock()
 			mcpError(w, 400, "invalid_request")
+			return
+		}
+		pendingForClient := 0
+		for _, request := range s.pending {
+			if request.ClientID == client.ID {
+				pendingForClient++
+			}
+		}
+		if pendingForClient >= mcpPendingPerClient {
+			s.mu.Unlock()
+			mcpError(w, http.StatusTooManyRequests, "temporarily_unavailable")
 			return
 		}
 		if len(s.pending) >= mcpStoreLimit {
@@ -291,7 +328,9 @@ func (s *MCPOAuthServer) HandleAuthorize(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *MCPOAuthServer) consent(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("Origin") != s.origin {
+	origin, ok := urlutil.NormalizeOrigin(r.Header.Get("Origin"))
+	expectedOrigin, _ := urlutil.NormalizeOrigin(s.origin)
+	if !ok || origin != expectedOrigin {
 		mcpError(w, 400, "invalid_request")
 		return
 	}

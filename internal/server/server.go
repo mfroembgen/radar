@@ -398,10 +398,13 @@ func New(cfg Config) *Server {
 	}
 
 	if cfg.MCPOAuthEnabled {
-		if s.authConfig.Mode != "oidc" || cloudMode() || cfg.CloudConnect.CloudTunnelConfigured || s.mcpHandler == nil {
+		if s.authConfig.Mode != "oidc" || cloudMode() || cfg.CloudConnect.CloudTunnelConfigured || (s.mcpHandler == nil && s.mcpReadOnlyHandler == nil) {
 			log.Fatal("[auth] MCP OAuth requires OIDC authentication and MCP enabled in a standalone deployment")
 		}
-		resources := []string{"/mcp"}
+		var resources []string
+		if s.mcpHandler != nil {
+			resources = append(resources, "/mcp")
+		}
 		if s.mcpReadOnlyHandler != nil {
 			resources = append(resources, "/mcp-readonly")
 		}

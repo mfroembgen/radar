@@ -99,14 +99,13 @@ type AppConfig struct {
 	MCPReadOnly                 bool
 	MCPEnabled                  bool
 	MCPExecTools                bool // register exec_pod (--mcp-exec-tools)
-
-	MCPOAuthEnabled       bool
-	AIHistory             bool   // persist AI investigations across restarts
-	AIHistoryDBPath       string // "" = ~/.radar/ai-runs.db
-	AuthConfig            auth.Config
-	HubAPIURL             string // Hub API origin override ("" = hosted default)
-	HubAppURL             string // Hub frontend origin override ("" = derived)
-	CloudTunnelConfigured bool   // --cloud-url was set on this process
+	MCPOAuthEnabled             bool
+	AIHistory                   bool   // persist AI investigations across restarts
+	AIHistoryDBPath             string // "" = ~/.radar/ai-runs.db
+	AuthConfig                  auth.Config
+	HubAPIURL                   string // Hub API origin override ("" = hosted default)
+	HubAppURL                   string // Hub frontend origin override ("" = derived)
+	CloudTunnelConfigured       bool   // --cloud-url was set on this process
 }
 
 // SetGlobals applies debug/test flags to global state.
