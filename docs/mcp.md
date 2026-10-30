@@ -252,6 +252,16 @@ Ensure your ingress routes the advertised `/.well-known/*` paths and `/auth/*` p
 - Dynamic registration accepts at most 20 valid registrations per minute per Radar process; malformed requests do not consume this shared capacity limit. Each client can have at most eight pending authorization requests. Complete initial authorization within 10 minutes; approved client registrations last 30 days and are renewed on consent.
 - Client registrations, authorization requests and tokens are bounded, in-memory state. Run exactly one replica. The chart uses `Recreate` rollouts to avoid routing requests across independent stores. Pod restarts invalidate this state even when browser session signing keys or timeline storage persist: reconnect the MCP client, re-register it and authorize again. If the client caches a stale client ID, remove and re-add its Radar server configuration.
 
+When enabling OAuth on an existing RollingUpdate Deployment managed by Argo CD
+with server-side apply, use its [per-resource client-side apply override](https://argo-cd.readthedocs.io/en/stable/user-guide/sync-options/#server-side-apply).
+Server-side apply can retain the old `rollingUpdate` settings, which Kubernetes
+rejects with `type: Recreate`. Set this chart value on the Deployment:
+
+```yaml
+deploymentAnnotations:
+  argocd.argoproj.io/sync-options: ServerSideApply=false
+```
+
 ## Catalog Introspection
 
 MCP registries and inspectors can start Radar without a Kubernetes cluster when they only need the tool and resource catalog:

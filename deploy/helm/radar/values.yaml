@@ -230,6 +230,8 @@ rbac:
   # Example: ["mycompany.io", "custom.example.com"]
   additionalCrdGroups: []
 
+deploymentAnnotations: {}
+
 podAnnotations: {}
 
 podLabels: {}

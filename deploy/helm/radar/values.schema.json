@@ -123,6 +123,7 @@
         }
       }
     },
+    "deploymentAnnotations": { "type": "object", "additionalProperties": { "type": "string" } },
     "podAnnotations": { "type": "object", "additionalProperties": { "type": "string" } },
     "podLabels": { "type": "object", "additionalProperties": { "type": "string" } },
     "podSecurityContext": { "type": "object" },

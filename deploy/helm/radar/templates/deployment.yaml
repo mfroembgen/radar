@@ -87,6 +87,10 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "radar.fullname" . }}
+  {{- with .Values.deploymentAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   labels:
     {{- include "radar.labels" . | nindent 4 }}
 spec:

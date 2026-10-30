@@ -28,6 +28,22 @@ tests:
           path: spec.strategy.type
           value: Recreate
 
+  - it: allows client-side apply for an existing Argo CD Deployment
+    set:
+      mcp.oauth.enabled: true
+      auth.mode: oidc
+      deploymentAnnotations:
+        argocd.argoproj.io/sync-options: ServerSideApply=false
+    asserts:
+      - equal:
+          path: metadata.annotations["argocd.argoproj.io/sync-options"]
+          value: ServerSideApply=false
+      - notExists:
+          path: spec.template.metadata.annotations["argocd.argoproj.io/sync-options"]
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+
   - it: rejects disabled MCP
     set:
       mcp.enabled: false
