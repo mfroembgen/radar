@@ -1,0 +1,63 @@
+apiVersion: v1
+entries:
+  radar:
+  - annotations:
+      artifacthub.io/images: |
+        - name: radar
+          image: ghcr.io/mfroembgen/radar:mcp-oauth-593e0c77d29be3fa82a2cc4b2f08e89b082da5d6
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/links: |
+        - name: Website
+          url: https://radarhq.io
+        - name: Documentation
+          url: https://radarhq.io/docs
+        - name: Source
+          url: https://github.com/skyhook-io/radar
+        - name: Releases
+          url: https://github.com/skyhook-io/radar/releases
+        - name: Discord
+          url: https://radarhq.io/community/chat
+      artifacthub.io/maintainers: |
+        - name: Skyhook
+          email: support@skyhook.io
+      artifacthub.io/screenshots: |
+        - title: Multi-cluster topology
+          url: https://github.com/skyhook-io/radar/raw/main/docs/screenshots/topology-view.png
+        - title: Resource browser
+          url: https://github.com/skyhook-io/radar/raw/main/docs/screenshots/resources-view.png
+        - title: Event timeline
+          url: https://github.com/skyhook-io/radar/raw/main/docs/screenshots/timeline-view.png
+        - title: Service traffic map
+          url: https://github.com/skyhook-io/radar/raw/main/docs/screenshots/traffic-view.png
+      category: monitoring-logging
+    apiVersion: v2
+    appVersion: mcp-oauth-593e0c77d29be3fa82a2cc4b2f08e89b082da5d6
+    created: "2026-10-30T13:45:54.638397+01:00"
+    description: Modern Kubernetes visibility - topology, traffic, Helm and GitOps
+      management
+    digest: 9e1b2eebcff51f0ff0a30cd61093d761de262887b29f1efc92cb50a3edf89303
+    home: https://radarhq.io
+    icon: https://radarhq.io/radar/icon-512.png
+    keywords:
+    - kubernetes
+    - kubernetes-dashboard
+    - kubernetes-ui
+    - kubernetes-monitoring
+    - visualization
+    - topology
+    - helm
+    - gitops
+    - mcp
+    maintainers:
+    - email: support@skyhook.io
+      name: Skyhook
+      url: https://radarhq.io
+    name: radar
+    sources:
+    - https://github.com/mfroembgen/radar/tree/5772445c05d8b880493438ed773aa264a280f372
+    - https://github.com/skyhook-io/radar
+    type: application
+    urls:
+    - radar-1.17.0-mcp-oauth.g5772445c.tgz
+    version: 1.17.0-mcp-oauth.g5772445c
+generated: "2026-10-30T13:45:54.636425+01:00"
