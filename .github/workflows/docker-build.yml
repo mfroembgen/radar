@@ -1,43 +1,101 @@
 name: Docker Build
 
 on:
+  push:
+    branches: [codex/mcp-oauth-fork]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Image tag (e.g. auth-test, my-feature)'
-        required: true
 
 permissions:
   contents: read
   packages: write
 
 env:
-  DOCKER_REPO: ghcr.io/skyhook-io/radar
+  SOURCE_SHA: 2f5bb28167598743a1ac7e99550ca159bd1dff40
+  UPSTREAM_RELEASE_SHA: 1cf0dea9ca839b355335ae03523e586b0d27aea8
+  RELEASE_VERSION: 1.19.0
+  DOCKER_REPO: ghcr.io/mfroembgen/radar
 
 jobs:
   docker:
-    name: Build & Push
+    if: github.repository == 'mfroembgen/radar'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 2
+      - name: Verify release base and source
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git show -s --format=%P HEAD)" = "$UPSTREAM_RELEASE_SHA"
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Build release frontend
+        run: |
+          npm ci
+          npm --workspace web run build
+          rm -rf internal/static/dist
+          mkdir -p internal/static/dist
+          cp -r web/dist/. internal/static/dist/
+          test -z "$(git status --porcelain)"
+      - name: Build native release binaries
+        run: |
+          mkdir -p "$RUNNER_TEMP/radar-binaries"
+          for arch in amd64 arm64; do
+            test -z "$(git status --porcelain)"
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build \
+              -buildvcs=true \
+              -ldflags "-s -w -X main.version=$RELEASE_VERSION" \
+              -o "$RUNNER_TEMP/radar-binaries/radar-$arch" ./cmd/explorer
+          done
+          test "$("$RUNNER_TEMP/radar-binaries/radar-amd64" --version)" = "radar $RELEASE_VERSION"
+          python3 - <<'PYTHON'
+          import os
+          from pathlib import Path
+          import struct
+          import subprocess
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Login to GHCR
-        uses: docker/login-action@v4
+          root = Path(os.environ["RUNNER_TEMP"]) / "radar-binaries"
+          for arch, expected in (("amd64", 62), ("arm64", 183)):
+              binary = root / f"radar-{arch}"
+              header = binary.read_bytes()[:20]
+              assert header[:6] == b"\x7fELF\x02\x01"
+              assert struct.unpack_from("<H", header, 18)[0] == expected
+              metadata = subprocess.check_output(["go", "version", "-m", str(binary)], text=True)
+              assert f"vcs.revision={os.environ['SOURCE_SHA']}" in metadata
+              assert "vcs.modified=false" in metadata
+              assert f"main.version={os.environ['RELEASE_VERSION']}" in metadata
+              print(metadata)
+          PYTHON
+          cp "$RUNNER_TEMP/radar-binaries/radar-amd64" radar-amd64
+          cp "$RUNNER_TEMP/radar-binaries/radar-arm64" radar-arm64
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push
-        uses: docker/build-push-action@v7
+      - uses: docker/build-push-action@v7
+        id: image
         with:
           context: .
-          platforms: linux/amd64
-          target: full
+          platforms: linux/amd64,linux/arm64
+          target: release
           push: true
-          build-args: |
-            VERSION=${{ github.event.inputs.tag }}
-          tags: ${{ env.DOCKER_REPO }}:${{ github.event.inputs.tag }}
+          tags: ${{ env.DOCKER_REPO }}:${{ env.RELEASE_VERSION }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/mfroembgen/radar
+            org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
+            org.opencontainers.image.version=${{ env.RELEASE_VERSION }}
+      - name: Record immutable provenance
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          printf 'Image: `%s:%s`\n\nSource: `%s`\n\nManifest: `%s`\n' \
+            "$DOCKER_REPO" "$RELEASE_VERSION" "$SOURCE_SHA" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
