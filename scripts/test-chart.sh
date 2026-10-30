@@ -273,7 +273,6 @@ echo
 render "defaults — no RBAC reads (viewRBAC=false)"
 # The base radar ClusterRole should NOT include rbac.authorization.k8s.io reads
 # at default settings. This is the single test that pins the secure default.
-HELM_BASE=$(echo "$OUT" | awk '/^kind: ClusterRole$/,/^---$/{ if ($0 ~ /^---$/) exit; print }' | awk '/^  name: radar$/,EOF')
 if awk '/  name: radar$/,/^---$/' <<< "$OUT" | grep -E 'apiGroups: \["rbac.authorization.k8s.io"\]' > /dev/null; then
   fail "default ClusterRole still grants rbac.authorization.k8s.io reads — viewRBAC should gate this"
 else
