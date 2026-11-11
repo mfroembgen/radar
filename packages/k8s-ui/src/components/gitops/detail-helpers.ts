@@ -2,6 +2,7 @@ import { argoApplicationSetConditionsToGitOpsStatus, argoStatusToGitOpsStatus, f
 import type { GitOpsResourceTree } from '../../types/gitops-tree'
 import { formatCompactAge } from '../../utils/format'
 import { apiVersionToGroup } from '../../utils/navigation'
+import { stripTrailingSlashes } from '../../utils/url-path'
 
 // =============================================================================
 // Shared helpers used by both per-cluster Radar's GitOps detail view (OSS
@@ -34,7 +35,7 @@ export function formatGitOpsDestination(server: string | undefined, namespace: s
   // "https://kubernetes.default.svc/" variant (the in-cluster URL with a
   // trailing slash that some controller versions emit) matches the literal
   // we collapse to "in-cluster".
-  let host = (server || '').trim().replace(/\/+$/, '')
+  let host = stripTrailingSlashes((server || '').trim())
   if (host === '' || host === 'https://kubernetes.default.svc' || host === 'in-cluster') {
     host = 'in-cluster'
   } else {
