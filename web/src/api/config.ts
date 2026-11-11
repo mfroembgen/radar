@@ -13,6 +13,8 @@
 // clusters on the same page) is a V2 concern — it would require
 // replacing this with a context.
 
+import { stripTrailingSlashes } from '@skyhook-io/k8s-ui/utils/url-path';
+
 let apiBase = '/api';
 let basename = '';
 let authHeadersProvider: () => Record<string, string> = () => ({});
@@ -31,7 +33,7 @@ export function getApiBase(): string {
  *   - An absolute URL: `https://api.radarhq.io/c/abc/api` (URLs use that origin)
  */
 export function setApiBase(url: string): void {
-  apiBase = url.replace(/\/+$/, '');
+  apiBase = stripTrailingSlashes(url);
 }
 
 /**
@@ -49,7 +51,7 @@ export function getBasename(): string {
  * to construct a URL relative to the host app's origin.
  */
 export function setBasename(value: string): void {
-  basename = value.replace(/\/+$/, '');
+  basename = stripTrailingSlashes(value);
 }
 
 /**
