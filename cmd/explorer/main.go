@@ -123,7 +123,7 @@ func main() {
 	prometheusURL := flag.String("prometheus-url", fileCfg.PrometheusURL, "Manual Prometheus/VictoriaMetrics URL (skips auto-discovery)")
 	workloadSingleCluster := flag.Bool("prometheus-single-cluster", false, "Optional workload/PVC metrics scope override: assert that the backend contains only this Kubernetes cluster. Replaces automatic matching; not saved, and cleared when the cluster, backend or credentials change. Does not scope rightsizing, node/HPA or legacy network/storage metrics.")
 	workloadClusterLabels := map[string]string{}
-	flag.Func("prometheus-cluster-label", "Optional workload/PVC metrics scope override: exact label=value identifying this cluster, e.g. cluster=production (repeatable, ANDed). Alternative to --prometheus-single-cluster, with the same lifetime and scope; leave both unset for automatic matching.", func(raw string) error {
+	flag.Func("prometheus-cluster-label", "Optional workload/PVC metrics scope override, also used for the Caretta/Beyla/Istio traffic map on a metrics store you configured: exact label=value identifying this cluster, e.g. cluster=production (repeatable, ANDed). Alternative to --prometheus-single-cluster, with the same lifetime and scope; leave both unset for automatic matching.", func(raw string) error {
 		key, value, ok := strings.Cut(raw, "=")
 		if !ok {
 			return fmt.Errorf("expected label=value")
@@ -159,6 +159,7 @@ func main() {
 	authUserHeader := flag.String("auth-user-header", "X-Forwarded-User", "Header for username (proxy mode)")
 	authGroupsHeader := flag.String("auth-groups-header", "X-Forwarded-Groups", "Header for groups (proxy mode)")
 	authProxyLogoutURL := flag.String("auth-proxy-logout-url", "", "URL the logout button redirects to in proxy mode, to tear down the upstream proxy session (e.g. oauth2-proxy's /oauth2/sign_out). The proxy must actually invalidate the session at this URL — Radar only clears its own cookie (Basic Auth has no logout). Empty = clear Radar's cookie only.")
+	authProxyLogoutCookies := flag.String("auth-proxy-logout-cookies", "", "Comma-separated names of the auth proxy's session cookies, for example '_oauth2_proxy*' (* matches any characters). In proxy mode, logout deletes every matching cookie the browser sends, so the next request goes back through the proxy's sign-in. Use it when the proxy has no sign-out URL, or together with --auth-proxy-logout-url.")
 	authOIDCIssuer := flag.String("auth-oidc-issuer", "", "OIDC issuer URL")
 	authOIDCInternalIssuer := flag.String("auth-oidc-internal-issuer", "", "Internal OIDC issuer base URL used by Radar for discovery and derived server-side endpoints; tokens are still validated against --auth-oidc-issuer")
 	authOIDCAuthorizationURL := flag.String("auth-oidc-authorization-url", "", "Browser-facing OIDC authorization endpoint URL (overrides discovery)")
@@ -265,6 +266,9 @@ func main() {
 		*authUserHeader = "X-Forwarded-User"
 		*authGroupsHeader = "X-Forwarded-Groups"
 		log.Printf("[cloud] RADAR_CLOUD_MODE=true: auth-mode forced to proxy, trusting tunnel-supplied identity headers")
+	}
+	if err := pkgauth.ValidateProxyLogoutCookies(parseCSV(*authProxyLogoutCookies)); err != nil {
+		log.Fatalf("--auth-proxy-logout-cookies: %v", err)
 	}
 	credentialMode, err := pkgauth.ParseCredentialMode(*k8sCredentials)
 	if err != nil {
@@ -398,8 +402,8 @@ func main() {
 	if *namespaceScope && len(resolvedRBACNamespaces) > 0 {
 		log.Fatalf("--namespace-scope cannot be combined with --rbac-namespaces")
 	}
-	if len(resolvedNamespaces) > *maxScopeCandidates {
-		log.Fatalf("--namespaces lists %d namespaces but the RBAC probe fanout cap is %d; raise --max-scope-candidates (or RADAR_MAX_SCOPE_CANDIDATES) to cover all of them", len(resolvedNamespaces), *maxScopeCandidates)
+	if err := app.CheckNamespaceCount(resolvedNamespaces, *maxScopeCandidates); err != nil {
+		log.Fatalf("%v", err)
 	}
 	resolvedKubeconfig, resolvedKubeconfigDirs := app.ResolveKubeconfigSelection(
 		*kubeconfig, *kubeconfigDir, kubeconfigFlagSet, kubeconfigDirsFlagSet,
@@ -491,6 +495,7 @@ func main() {
 			UserHeader:                *authUserHeader,
 			GroupsHeader:              *authGroupsHeader,
 			ProxyLogoutURL:            *authProxyLogoutURL,
+			ProxyLogoutCookies:        parseCSV(*authProxyLogoutCookies),
 			OIDCIssuer:                *authOIDCIssuer,
 			OIDCInternalIssuer:        *authOIDCInternalIssuer,
 			OIDCAuthorizationURL:      *authOIDCAuthorizationURL,

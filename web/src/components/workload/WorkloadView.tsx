@@ -25,6 +25,7 @@ import {
   isDiagnoseKind,
   isRolloutKind,
   canSetWorkloadImages,
+  canPauseDeployment,
   isCoreBatchJob,
   type SetImageOwnership,
   SET_IMAGE_WRITES,
@@ -38,6 +39,7 @@ import type { ServicePortRenderProps } from '@skyhook-io/k8s-ui/components/resou
 import { isJobSetV1Alpha2 } from '@skyhook-io/k8s-ui/components/resources/resource-utils-jobset-lws'
 import type { SelectedResource, ResourceRef, Relationships, ResourceWithRelationships } from '../../types'
 import { CronJobSchedulingContext, CronJobSchedulingDetails } from './CronJobSchedulingEvidence'
+import { NodeCertificateContext, NodeCertificateDetails, nodeCertificateContextVisible } from './NodeCertificateEvidence'
 import { useHistoryPaging } from './historyPaging'
 import { findInheritedGitOpsLookupRef, useResolvedGitOpsOwner } from '../../hooks/useResolvedGitOpsOwner'
 import { useGitOpsWriteGuard } from '../../hooks/useGitOpsWriteGuard'
@@ -64,10 +66,13 @@ import {
   useSuspendCronJob,
   useResumeCronJob,
   useRestartWorkload,
+  usePauseDeployment,
+  useResumeDeployment,
   fetchWorkloadImages,
   fetchResourceWithRelationships,
   useSetWorkloadImages,
   useWorkloadRevisions,
+  useRefreshRevisionsOnNewRollout,
   useRollbackWorkload,
   useRolloutAction,
   useRolloutCapabilities,
@@ -326,6 +331,8 @@ function useActionsBarProps(
 
   const deleteMutation = useDeleteResource()
   const restartWorkloadMutation = useRestartWorkload()
+  const pauseDeploymentMutation = usePauseDeployment()
+  const resumeDeploymentMutation = useResumeDeployment()
   const setWorkloadImagesMutation = useSetWorkloadImages()
   const rollbackMutation = useRollbackWorkload()
   // Only the revision dialog drives this one, and it explains a failed promote in place
@@ -348,6 +355,9 @@ function useActionsBarProps(
   const canSetImages = isRolloutShape
     ? imageUpdatesSupported && isRollout && !rolloutCapabilitiesPending && rolloutCapabilities?.setImage === true
     : !workloadWritesPending && canSetWorkloadImages({ name: kind, group }, workloadWrites, imageUpdatesSupported)
+  const { support: deploymentPauseSupport } = useRadarFeature('deploymentPause')
+  const canPauseDeployments = !workloadWritesPending &&
+    canPauseDeployment({ name: kind, group }, workloadWrites, deploymentPauseSupport === 'supported')
   const loadImages = useCallback(
     (params: { kind: string; namespace: string; name: string }) =>
       queryClient.fetchQuery({
@@ -434,6 +444,16 @@ function useActionsBarProps(
           restartWorkloadMutation.mutate(params)
       : undefined,
     isRestarting: restartWorkloadMutation.isPending,
+    onPauseDeployment: canPauseDeployments
+      ? (params: Parameters<typeof pauseDeploymentMutation.mutate>[0]) =>
+          pauseDeploymentMutation.mutate(params)
+      : undefined,
+    onResumeDeployment: canPauseDeployments
+      ? (params: Parameters<typeof resumeDeploymentMutation.mutate>[0]) =>
+          resumeDeploymentMutation.mutate(params)
+      : undefined,
+    isPausingDeployment: pauseDeploymentMutation.isPending,
+    isResumingDeployment: resumeDeploymentMutation.isPending,
     onLoadImages: canSetImages ? loadImages : undefined,
     onSetImages: canSetImages
       ? (params: Parameters<typeof setWorkloadImagesMutation.mutateAsync>[0]) =>
@@ -592,6 +612,12 @@ export function WorkloadView({
   } = useResourceWithRelationships<any>(apiKind, namespace, name, rest.group)
   const resource = resourceResponse?.resource
   const relationships = resourceResponse?.relationships
+  useRefreshRevisionsOnNewRollout(
+    apiKind.toLowerCase(),
+    namespace,
+    name,
+    resource ? resource.metadata?.annotations?.['deployment.kubernetes.io/revision'] ?? '' : undefined,
+  )
   const resourceGroup = useMemo(
     () => (resource?.apiVersion ? apiVersionToGroup(resource.apiVersion) : undefined),
     [resource?.apiVersion],
@@ -654,6 +680,7 @@ export function WorkloadView({
     [podWorkloadOwner, podOwnerAppsQuery.data?.applications],
   )
   const certificateInfo = resourceResponse?.certificateInfo
+  const certificateSigningRequest = resourceResponse?.certificateSigningRequest
   const hpaDiagnosis = resourceResponse?.hpaDiagnosis
   const activeImageTargetOwnership = useMemo(
     () =>
@@ -845,20 +872,27 @@ export function WorkloadView({
   // the renderer banners. The backend canonicalizes a plural kind via discovery,
   // so using the normalized API kind resolves direct links and app navigation alike.
   const isCronJob = apiKind === 'cronjobs' && (!effectiveGroup || effectiveGroup === 'batch')
+  const isCoreNode = apiKind === 'nodes' && !effectiveGroup
   const { support: coverageSupport } = useRadarFeature('resourceIssueCoverage')
-  const useCronJobCoverage = isCronJob && coverageSupport === 'supported'
+  const useReportCoverage = (isCronJob || isCoreNode) && coverageSupport === 'supported'
   const issueObservation = resource ? JSON.stringify([resource.metadata?.uid, resource.metadata?.resourceVersion]) : undefined
   const ordinaryIssues = useResourceIssues(apiKind, rest.group, namespace, name,
-    rest.active !== false && !useCronJobCoverage && !isNotFoundError(resourceError), issueObservation)
-  const cronJobIssues = useSubjectIssues(useCronJobCoverage ? { kind: 'CronJob', group: 'batch', namespace, name, uid: resource?.metadata?.uid } : null, useCronJobCoverage && Boolean(resource))
-  const liveIssues = useCronJobCoverage ? cronJobIssues.data?.issues : ordinaryIssues.data
-  const issuesPending = useCronJobCoverage ? cronJobIssues.isPending : ordinaryIssues.isPending
-  const schedulingEvidence = cronJobIssues.data?.scheduling_report?.uid === resource?.metadata?.uid ? cronJobIssues.data?.scheduling_report : undefined
-  const [schedulingTimelineFocus, setSchedulingTimelineFocus] = useState<{ uid: string; id: string }>()
+    rest.active !== false && !useReportCoverage && !isNotFoundError(resourceError), issueObservation)
+  const subjectIssues = useSubjectIssues(useReportCoverage ? { kind: isCoreNode ? 'Node' : 'CronJob', group: isCoreNode ? '' : 'batch', namespace, name, uid: resource?.metadata?.uid } : null, useReportCoverage && Boolean(resource))
+  const liveIssues = useReportCoverage ? subjectIssues.data?.issues : ordinaryIssues.data
+  const issuesPending = useReportCoverage ? subjectIssues.isPending : ordinaryIssues.isPending
+  const schedulingEvidence = isCronJob && subjectIssues.data?.scheduling_report?.uid === resource?.metadata?.uid ? subjectIssues.data?.scheduling_report : undefined
+  const certificateEvidence = isCoreNode && subjectIssues.data?.node_certificate_report?.uid === resource?.metadata?.uid ? subjectIssues.data?.node_certificate_report : undefined
+  const hasCertificateIssue = Boolean(liveIssues?.some(issue => issue.kind === 'Node' && issue.reason === 'NodeCertificateExpiry'))
+  const [reportTimelineFocus, setReportTimelineFocus] = useState<{ uid: string; id: string }>()
   const viewSchedulingReport = useCallback(() => {
-    setSchedulingTimelineFocus(schedulingEvidence?.event_id ? { uid: schedulingEvidence.uid, id: schedulingEvidence.event_id } : undefined)
+    setReportTimelineFocus(schedulingEvidence?.event_id ? { uid: schedulingEvidence.uid, id: schedulingEvidence.event_id } : undefined)
     handleTabChange('timeline')
   }, [schedulingEvidence, handleTabChange])
+  const viewCertificateReport = useCallback(() => {
+    setReportTimelineFocus(certificateEvidence?.event_id ? { uid: certificateEvidence.uid, id: certificateEvidence.event_id } : undefined)
+    handleTabChange('timeline')
+  }, [certificateEvidence, handleTabChange])
   const { data: auditFindings } = useResourceAudit(apiKind, namespace, name, effectiveGroup)
   const hasOperationalIssues = Boolean(liveIssues?.length)
   const openIssueResource = issueResourceOpener(rest.onNavigateToResource)
@@ -1187,6 +1221,7 @@ export function WorkloadView({
         ownershipContext={ownershipContext}
         onOpenApplication={handleOpenApplication}
         certificateInfo={certificateInfo}
+        certificateSigningRequest={certificateSigningRequest}
         hpaDiagnosis={hpaDiagnosis}
         workloadPods={supportsWorkloadPods ? workloadPodsQuery.data?.pods : undefined}
         onEvaluateCapacity={
@@ -1207,7 +1242,7 @@ export function WorkloadView({
         refetch={refetchResourceAndRuns}
         // Timeline
         allEvents={allEvents}
-        timelineFocusEvent={schedulingTimelineFocus?.uid === resource?.metadata?.uid ? schedulingTimelineFocus : undefined}
+        timelineFocusEvent={reportTimelineFocus?.uid === resource?.metadata?.uid ? reportTimelineFocus : undefined}
         historyTruncated={!historyFallback && historyTruncated}
         onLoadOlderHistory={historyFallback ? undefined : loadOlderHistory}
         loadingOlderHistory={!historyFallback && loadingOlderHistory}
@@ -1355,16 +1390,21 @@ export function WorkloadView({
         renderOverviewLead={() => (
           <div className="flex flex-col gap-4">
           <CronJobSchedulingContext evidence={schedulingEvidence} onViewTimeline={viewSchedulingReport} />
+          <NodeCertificateContext evidence={certificateEvidence} hasIssue={hasCertificateIssue} onViewTimeline={viewCertificateReport} />
           <ResourceIssuesSection
             issues={liveIssues}
-            renderDetailSection={schedulingEvidence?.state === 'reported' ? ({ issue }) => issue.kind === 'CronJob' && issue.reason === schedulingEvidence.reason ? <CronJobSchedulingDetails evidence={schedulingEvidence} onViewTimeline={viewSchedulingReport} /> : null : undefined}
+            renderDetailSection={({ issue }) => {
+              if (schedulingEvidence?.state === 'reported' && issue.kind === 'CronJob' && issue.reason === schedulingEvidence.reason) return <CronJobSchedulingDetails evidence={schedulingEvidence} onViewTimeline={viewSchedulingReport} />
+              if (certificateEvidence && issue.kind === 'Node' && issue.reason === 'NodeCertificateExpiry') return <NodeCertificateDetails evidence={certificateEvidence} onViewTimeline={viewCertificateReport} includeOriginalReport={false} />
+              return null
+            }}
             compact={!expanded}
             subjectResource={{ kind: apiKind, namespace, name, group: rest.group }}
             onResourceClick={openIssueResource}
           />
           </div>
         )}
-        hasOverviewLead={hasOperationalIssues || Boolean(schedulingEvidence && schedulingEvidence.state !== 'reported')}
+        hasOverviewLead={hasOperationalIssues || Boolean(schedulingEvidence && schedulingEvidence.state !== 'reported') || nodeCertificateContextVisible(certificateEvidence, hasCertificateIssue)}
         hasOperationalIssues={hasOperationalIssues}
         operationalIssuesPending={issuesPending}
         // A manager answer's chip links only managers the server found; a

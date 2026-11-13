@@ -129,13 +129,17 @@ type Server struct {
 	cloudConnectCfg     CloudConnectConfig
 	cloudInstall        *cloudInstallManager
 	applicationEvidence *applicationEvidenceAPI
-	// nsPreferences holds each user's active-namespace pick from the in-app
-	// switcher. Key shape: "<username>\x00<contextName>" when auth is enabled,
-	// "\x00<contextName>" when auth is disabled. Cleared on context switch
-	// (new cluster ⇒ old picks meaningless). The pick is a remembered per-user
-	// UI preference: the namespace-scope GET echoes it and the UI sends it on
-	// its reads, but data reads never inherit it. Picking does NOT narrow the
-	// shared informer cache (would corrupt other users' views).
+	// podFileWriteSlots bounds pod file uploads in flight across all users.
+	podFileWriteSlots     chan struct{}
+	podFileWriteSlotsOnce sync.Once
+	// nsPreferences holds each user's last active-namespace pick from the
+	// in-app switcher. Key shape: "<username>\x00<contextName>" when auth is
+	// enabled, "\x00<contextName>" when auth is disabled. Cleared on context
+	// switch (new cluster ⇒ old picks meaningless). Each browser tab owns its
+	// own pick; this one only seeds a tab that has none yet, so it is shared by
+	// everyone mapped to the same Kubernetes username. Data reads never
+	// inherit it. Picking does NOT narrow the shared informer cache (would
+	// corrupt other users' views).
 	nsPreferences sync.Map
 
 	// scopeMutationMu serializes a forced (--namespace-scope) namespace change so
@@ -551,13 +555,14 @@ func (s *Server) setupAppRoutes(r chi.Router) {
 	}
 
 	metricsHandler := s.newMetricsHandler()
-	r.Get("/metrics", metricsHandler.ServeHTTP)
+	r.With(s.requireSameOrigin).Get("/metrics", metricsHandler.ServeHTTP)
 
 	// Profiling exposes process diagnostics and can trigger costly collection.
 	// Keep unauthenticated shared listeners opt-in and Cloud routes unmounted.
 	if s.pprofEnabled() {
 		log.Printf("[server] pprof endpoints enabled at /debug/pprof/")
 		r.Route("/debug/pprof", func(r chi.Router) {
+			r.Use(s.requireSameOrigin)
 			r.Get("/", pprof.Index)
 			r.Get("/cmdline", func(w http.ResponseWriter, r *http.Request) {
 				if s.authConfig.Enabled() {
@@ -592,6 +597,9 @@ func (s *Server) setupAppRoutes(r chi.Router) {
 		// 60s timeout group for the same reason the download does — a large file
 		// over a slow cluster link legitimately takes longer than that.
 		r.Post("/pods/{namespace}/{name}/files/save", s.handlePodFileSave)
+		// Outside the 60s timeout group because a large upload over a slow
+		// cluster link takes longer.
+		r.Post("/pods/{namespace}/{name}/files/upload", s.handlePodFileUpload)
 		r.Get("/workloads/{kind}/{namespace}/{name}/logs/stream", s.handleWorkloadLogsStream)
 		r.Get("/cnpg/clusters/{namespace}/{name}/logs/stream", s.handleCNPGClusterLogsStream)
 		// AI investigation event stream via SSE — long-lived; lives outside the
@@ -833,6 +841,8 @@ func (s *Server) setupAppRoutes(r chi.Router) {
 
 			// Workload restart, scale, rollback
 			r.Post("/workloads/{kind}/{namespace}/{name}/restart", s.handleRestartWorkload)
+			r.Post("/workloads/{kind}/{namespace}/{name}/pause", s.handlePauseDeployment)
+			r.Post("/workloads/{kind}/{namespace}/{name}/resume", s.handleResumeDeployment)
 			r.Post("/workloads/{kind}/{namespace}/{name}/scale", s.handleScaleWorkload)
 			r.Get("/workloads/{kind}/{namespace}/{name}/images", s.handleGetWorkloadImages)
 			r.Post("/workloads/{kind}/{namespace}/{name}/images", s.handleSetWorkloadImages)
@@ -1515,9 +1525,11 @@ func advertisedFeatures() k8s.FeatureCapabilities {
 		ApplicationEvidence:      true,
 		ResourceReadCoverage:     true,
 		SearchCoverage:           true,
+		SearchEventContent:       true,
 		YAMLReview:               true,
 		YAMLSchemas:              true,
 		WorkloadImages:           true,
+		DeploymentPause:          true,
 		ResourceIssues:           true,
 		ResourceIssueCoverage:    true,
 		PodEnvironment:           true,
@@ -1539,6 +1551,7 @@ func advertisedFeatures() k8s.FeatureCapabilities {
 		RayClusterPods:           true,
 		PodSidecarMarks:          true,
 		KueueQueueWorkloads:      true,
+		PodFileUpload:            true,
 	}
 }
 
@@ -1568,6 +1581,8 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	caps.Deployment = k8s.DeploymentInfo{Mode: deploymentMode()}
 	caps.CloudConnect = s.cloudConnectCapability()
 	caps.Features = advertisedFeatures()
+	// handlePodFileUpload refuses in Radar Cloud; hide the control to match.
+	caps.Features.PodFileUpload = !cloudMode()
 	caps.AuthEnabled = s.authConfig.Enabled()
 	caps.ConfigManagement = s.configManagement()
 	status, _ := s.localTerminalUnavailable(r)
@@ -3073,12 +3088,12 @@ func (s *Server) handleGetResource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		s.writeJSON(w, topology.ResourceWithRelationships{
+		s.writeJSON(w, newResourceReadResponse(topology.ResourceWithRelationships{
 			RelatedFindings: issues.CachedStrimziEvidence(resource, s.issueRelatedResourceAccess(r), func(c *ownership.Catalog) ownership.Access { return s.ownershipAccess(r, c) }),
 			Resource:        resource,
 			Relationships:   relationships,
 			HPADiagnosis:    hpaDiagnosisFor(resource),
-		})
+		}))
 		return
 	}
 
@@ -3328,7 +3343,7 @@ func (s *Server) handleGetResource(w http.ResponseWriter, r *http.Request) {
 		s.writeCollectionFailure(w, kind, errReadHandlesChanged)
 		return
 	}
-	s.writeJSON(w, response)
+	s.writeJSON(w, newResourceReadResponse(response))
 }
 
 // servedSecret returns a cached Secret as it may be served. The cache holds
@@ -4715,6 +4730,10 @@ func (s *Server) handleRestartWorkload(w http.ResponseWriter, r *http.Request) {
 			s.writeRolloutError(w, err, "restart", namespace, name)
 			return
 		}
+		if errors.Is(err, k8score.ErrRestartPaused) {
+			s.writeErrorCode(w, http.StatusConflict, errCodeWorkloadPaused, err.Error())
+			return
+		}
 		if apierrors.IsNotFound(err) || errors.Is(err, k8score.ErrResourceNotFound) {
 			s.writeError(w, http.StatusNotFound, err.Error())
 			return
@@ -4728,6 +4747,60 @@ func (s *Server) handleRestartWorkload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, map[string]string{"message": "Workload restart initiated"})
+}
+
+// handlePauseDeployment holds a Deployment's pod template changes without rolling them out.
+func (s *Server) handlePauseDeployment(w http.ResponseWriter, r *http.Request) {
+	s.setDeploymentPaused(w, r, true)
+}
+
+// handleResumeDeployment lets a paused Deployment roll out its pod template again.
+func (s *Server) handleResumeDeployment(w http.ResponseWriter, r *http.Request) {
+	s.setDeploymentPaused(w, r, false)
+}
+
+// setDeploymentPaused patches as the caller, so Kubernetes RBAC decides, and it
+// returns 403 when the caller can't patch the Deployment. Without authentication
+// it acts with Radar's own identity, and requireSameOrigin keeps a page on another
+// site from reaching it.
+func (s *Server) setDeploymentPaused(w http.ResponseWriter, r *http.Request, paused bool) {
+	if !s.requireConnected(w) {
+		return
+	}
+
+	kind := chi.URLParam(r, "kind")
+	namespace := chi.URLParam(r, "namespace")
+	name := chi.URLParam(r, "name")
+
+	if k8score.NormalizeWorkloadKind(strings.ToLower(kind)) != "deployments" {
+		s.writeError(w, http.StatusBadRequest, "only Deployments can be paused or resumed")
+		return
+	}
+
+	auth.AuditLog(r, namespace, name)
+	client := s.getDynamicClientForRequest(r)
+	if client == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "cluster client not available — check cluster connection")
+		return
+	}
+	if err := k8s.SetDeploymentPausedWithClient(r.Context(), namespace, name, paused, client); err != nil {
+		switch {
+		case apierrors.IsNotFound(err):
+			s.writeError(w, http.StatusNotFound, err.Error())
+		case apierrors.IsForbidden(err):
+			s.writeError(w, http.StatusForbidden, err.Error())
+		default:
+			log.Printf("[workload] Failed to set paused=%t on Deployment %s/%s: %v", paused, namespace, name, err)
+			s.writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	message := "Deployment resumed"
+	if paused {
+		message = "Deployment paused"
+	}
+	s.writeJSON(w, map[string]string{"message": message})
 }
 
 // handleScaleWorkload scales a Deployment or StatefulSet to a new replica count
@@ -4883,13 +4956,25 @@ func (s *Server) handleRollbackWorkload(w http.ResponseWriter, r *http.Request) 
 		if status == http.StatusInternalServerError {
 			log.Printf("[rollback] Failed to rollback %s %s/%s to revision %d: %v", kind, namespace, name, req.Revision, err)
 		}
-		s.writeError(w, status, err.Error())
+		s.writeWorkloadRollbackError(w, status, err)
 		return
 	}
 
 	s.writeJSON(w, map[string]string{
 		"message": fmt.Sprintf("Rollback to revision %d initiated", req.Revision),
 	})
+}
+
+// errCodeWorkloadPaused lets the UI point at its own Resume control instead of
+// showing the server's text, which is written for API and agent callers.
+const errCodeWorkloadPaused = "workload_paused"
+
+func (s *Server) writeWorkloadRollbackError(w http.ResponseWriter, status int, err error) {
+	if errors.Is(err, k8score.ErrWorkloadPaused) {
+		s.writeErrorCode(w, status, errCodeWorkloadPaused, err.Error())
+		return
+	}
+	s.writeError(w, status, err.Error())
 }
 
 // workloadRollbackErrorStatus maps a Deployment/StatefulSet/DaemonSet rollback
@@ -5479,6 +5564,11 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	for _, c := range auth.ClearSessionCookie(r) {
 		http.SetCookie(w, c)
 	}
+	if s.authConfig.Mode == "proxy" {
+		for _, c := range auth.ClearProxyCookies(r, s.authConfig.ProxyLogoutCookies, s.basePath) {
+			http.SetCookie(w, c)
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	resp := map[string]string{"status": "logged out"}
 	// Clearing Radar's cookie alone doesn't switch users: the proxy
@@ -5498,7 +5588,7 @@ func (s *Server) handleAuthMe(w http.ResponseWriter, r *http.Request) {
 	// Tells the frontend whether proxy-mode logout can tear down the upstream
 	// session (vs only clearing Radar's cookie), so it can warn the user.
 	if s.authConfig.Mode == "proxy" {
-		resp["proxyLogoutConfigured"] = s.authConfig.ProxyLogoutURL != ""
+		resp["proxyLogoutConfigured"] = s.authConfig.ProxyLogoutURL != "" || len(s.authConfig.ProxyLogoutCookies) > 0
 	}
 	if user := auth.UserFromContext(r.Context()); user != nil {
 		resp["username"] = user.Username

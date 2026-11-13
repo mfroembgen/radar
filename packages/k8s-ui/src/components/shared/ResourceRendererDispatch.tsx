@@ -4,6 +4,8 @@ import { StrimziConnectorRenderer } from '../resources/renderers/StrimziConnecto
 import { getOpenTelemetryCollectorStatus, getOpenTelemetryInstrumentationStatus } from '../resources/resource-utils-opentelemetry'
 import { OpenTelemetryCollectorRenderer, OpenTelemetryInstrumentationRenderer } from '../resources/renderers/OpenTelemetryRenderers'
 import { FlaggerCanaryRenderer, FlaggerMetricTemplateRenderer } from '../resources/renderers/FlaggerRenderers'
+import { SecretProviderClassRenderer, type SecretProviderClassRendererProps } from '../resources/renderers/SecretsStoreRenderers'
+import { SECRETS_STORE_GROUP } from '../resources/resource-utils-secrets-store'
 import { getFlaggerCanaryStatus } from '../resources/resource-utils-flagger'
 import { getGitOpsTool } from '../gitops/detail-helpers'
 import { apiVersionToGroup } from '../../utils/navigation'
@@ -104,6 +106,7 @@ import {
   getRevisionStatus,
 } from '../resources/resource-utils-knative'
 import { getHTTPProxyStatus } from '../resources/resource-utils-contour'
+import { getCertificateSigningRequestStatus, isCertificateSigningRequest } from '../resources/resource-utils-csr'
 import {
   isCalicoApiVersion,
   isCalicoPolicyKind,
@@ -147,6 +150,7 @@ import {
   PersistentVolumeRenderer,
   StorageClassRenderer,
   CertificateRequestRenderer,
+  CertificateSigningRequestRenderer,
   ClusterIssuerRenderer,
   IssuerRenderer,
   OrderRenderer,
@@ -312,7 +316,7 @@ import {
   isComposite,
   isClaim,
 } from '../resources/resource-utils-crossplane'
-import type { SelectedResource, Relationships, ResourceRef, SecretCertificateInfo, ResolvedEnvFrom, TimelineEvent, HPADiagnosis, WorkloadPodInfo } from '../../types'
+import type { SelectedResource, Relationships, ResourceRef, SecretCertificateInfo, CertificateSigningRequestDetails, ResolvedEnvFrom, TimelineEvent, HPADiagnosis, WorkloadPodInfo } from '../../types'
 import type { CopyHandler } from '../ui/drawer-components'
 import { AlertBanner } from '../ui/drawer-components'
 import { replicaScalers } from '../../utils/replica-scalers'
@@ -393,6 +397,8 @@ export interface RendererOverrides {
     data: any
     onNavigate?: (ref: ResourceRef) => void
   }>
+  /** Host-injected: adds the Pods that mount this class and their mount state. */
+  SecretProviderClassRenderer?: React.ComponentType<Pick<SecretProviderClassRendererProps, 'data' | 'onNavigate'>>
   /** Host-injected: adds the Backups-stored-here lookup to a storage location. */
   VeleroBSLRenderer?: React.ComponentType<{
     data: any
@@ -455,6 +461,9 @@ export interface RendererOverrides {
   }>
   // PVC: host wraps the base renderer to add a kubelet-derived usage gauge
   // when Prometheus is scraping kubelet endpoints.
+  // HTTPRoute: host reads the parent Gateways so hostnames open with the
+  // scheme their listeners serve.
+  HTTPRouteRenderer?: React.ComponentType<{ data: any; onNavigate?: (ref: ResourceRef) => void }>
   PVCRenderer?: React.ComponentType<{
     data: any
     onNavigate?: (ref: ResourceRef) => void
@@ -481,6 +490,7 @@ const KNOWN_KINDS = new Set([
   'kafkaconnectors',
   'opentelemetrycollectors', 'instrumentations',
   'canaries', 'metrictemplates',
+  'secretproviderclasses',
   'pods', 'deployments', 'statefulsets', 'daemonsets', 'replicasets',
   'services', 'endpointslices', 'ingresses', 'configmaps', 'secrets', 'jobs', 'cronjobs', 'cronworkflows',
   'jobsets',
@@ -488,7 +498,7 @@ const KNOWN_KINDS = new Set([
   'hpas', 'horizontalpodautoscalers', 'nodes', 'persistentvolumeclaims',
   'rollouts', 'analysisruns', 'analysistemplates', 'clusteranalysistemplates', 'experiments', 'certificates', 'workflows', 'persistentvolumes',
   'storageclasses', 'certificaterequests', 'clusterissuers', 'issuers',
-  'orders', 'challenges',
+  'orders', 'challenges', 'certificatesigningrequests',
   'gateways', 'gatewayclasses', 'httproutes', 'grpcroutes', 'tcproutes', 'tlsroutes', 'udproutes', 'sealedsecrets', 'workflowtemplates', 'clusterworkflowtemplates',
   'networkpolicies', 'networkpolicy',
   'globalnetworkpolicies', 'globalnetworkpolicy',
@@ -591,6 +601,7 @@ interface ResourceRendererDispatchProps {
   /** See RelatedResourcesSection. */
   trackedBy?: string
   certificateInfo?: SecretCertificateInfo
+  certificateSigningRequest?: CertificateSigningRequestDetails
   hpaDiagnosis?: HPADiagnosis
   scalerDiagnostics?: ScalerDiagnosis[]
   workloadPods?: WorkloadPodInfo[]
@@ -639,6 +650,7 @@ export function ResourceRendererDispatch({
   relationships,
   trackedBy,
   certificateInfo,
+  certificateSigningRequest,
   hpaDiagnosis,
   scalerDiagnostics,
   workloadPods,
@@ -748,7 +760,9 @@ export function ResourceRendererDispatch({
     kind === 'kafkaconnectors' ||
     ['opentelemetrycollectors', 'instrumentations'].includes(kind) ||
     ['canaries', 'metrictemplates'].includes(kind) ||
+    kind === 'secretproviderclasses' ||
     isFluxKind || kind === 'applications' || kind === 'services' || kind === 'ingresses' || kind === 'certificates' || kind === 'gateways'
+    || kind === 'httproutes' || kind === 'grpcroutes'
     || kind === 'clusters' || kind === 'backups' || kind === 'scheduledbackups' || kind === 'poolers'
     || kind === 'objectstores' || kind === 'databases' || kind === 'publications'
     || kind === 'subscriptions' || kind === 'imagecatalogs' || kind === 'clusterimagecatalogs' || kind === 'databaseroles' || kind === 'jobsets'
@@ -756,18 +770,21 @@ export function ResourceRendererDispatch({
     || kind === 'rayjobs' || kind === 'rayclusters' || kind === 'rayservices' || kind === 'admissionchecks' || kind === 'provisioningrequests'
     || kind === 'machines' || kind === 'machinesets' || kind === 'workloads' || kind === 'localqueues' || kind === 'clusterqueues'
     || kind === 'validatingadmissionpolicies' || kind === 'validatingadmissionpolicybindings'
+    || kind === 'certificatesigningrequests'
   const isCNPGApiVersion = isApiGroup(data?.apiVersion, CNPG_GROUP)
   const groupGatedMatched =
     (kind === 'customresourcedefinitions' && isApiGroup(data?.apiVersion, 'apiextensions.k8s.io')) ||
     (kind === 'kafkaconnectors' && isApiGroup(data?.apiVersion, 'kafka.strimzi.io')) ||
     (['opentelemetrycollectors', 'instrumentations'].includes(kind) && isApiGroup(data?.apiVersion, 'opentelemetry.io')) ||
     (['canaries', 'metrictemplates'].includes(kind) && isApiGroup(data?.apiVersion, 'flagger.app')) ||
+    (kind === 'secretproviderclasses' && isApiGroup(data?.apiVersion, SECRETS_STORE_GROUP)) ||
     (isFluxKind && isFluxResource)
     || (kind === 'applications' && isApiGroup(data?.apiVersion, 'argoproj.io'))
     || (kind === 'services' && (data?.apiVersion === 'v1' || isApiGroup(data?.apiVersion, 'serving.knative.dev')))
     || (kind === 'ingresses' && ['networking.k8s.io', 'extensions', 'networking.internal.knative.dev'].some(group => isApiGroup(data?.apiVersion, group)))
     || (kind === 'certificates' && ['cert-manager.io', 'networking.internal.knative.dev'].some(group => isApiGroup(data?.apiVersion, group)))
     || (kind === 'gateways' && ['gateway.networking.k8s.io', 'networking.istio.io'].some(group => isApiGroup(data?.apiVersion, group)))
+    || ((kind === 'httproutes' || kind === 'grpcroutes') && isApiGroup(data?.apiVersion, 'gateway.networking.k8s.io'))
     || (kind === 'clusters' && (isCNPGApiVersion || isApiGroup(data?.apiVersion, 'cluster.x-k8s.io')))
     || (kind === 'backups' && (isCNPGApiVersion || isApiGroup(data?.apiVersion, 'velero.io')))
     || ((kind === 'scheduledbackups' || kind === 'poolers') && isCNPGApiVersion)
@@ -795,6 +812,7 @@ export function ResourceRendererDispatch({
     || ((kind === 'localqueues' || kind === 'clusterqueues') && isKueueQueueResource(data))
     || ((kind === 'validatingadmissionpolicies' || kind === 'validatingadmissionpolicybindings')
       && isApiGroup(data?.apiVersion, 'admissionregistration.k8s.io'))
+    || (kind === 'certificatesigningrequests' && isCertificateSigningRequest(data))
   const groupGatedFallthrough = isGroupGatedKind && !groupGatedMatched
 
   const calicoApiVersionMatched = isCalicoApiVersion(data?.apiVersion)
@@ -838,6 +856,7 @@ export function ResourceRendererDispatch({
   const CNPGSubscriptionComp = rendererOverrides?.CNPGSubscriptionRenderer ?? CNPGSubscriptionRenderer
   const CNPGObjectStoreComp = rendererOverrides?.CNPGObjectStoreRenderer ?? CNPGObjectStoreRenderer
   const VeleroBSLComp = rendererOverrides?.VeleroBSLRenderer ?? VeleroBSLRenderer
+  const SecretProviderClassComp = rendererOverrides?.SecretProviderClassRenderer ?? SecretProviderClassRenderer
   const VeleroBackupComp = rendererOverrides?.VeleroBackupRenderer ?? VeleroBackupRenderer
   const VeleroRestoreComp = rendererOverrides?.VeleroRestoreRenderer ?? VeleroRestoreRenderer
   const KyvernoCoverageComp = rendererOverrides?.KyvernoPolicyCoverage
@@ -854,6 +873,7 @@ export function ResourceRendererDispatch({
   const CRDComp = rendererOverrides?.CustomResourceDefinitionRenderer ?? CustomResourceDefinitionRenderer
   const HPAComp = rendererOverrides?.HPARenderer ?? HPARenderer
   const PVCComp = rendererOverrides?.PVCRenderer ?? PVCRenderer
+  const HTTPRouteComp = rendererOverrides?.HTTPRouteRenderer ?? HTTPRouteRenderer
   const RolloutComp = rendererOverrides?.RolloutRenderer ?? RolloutRenderer
   const ValidatingAdmissionPolicyComp = rendererOverrides?.ValidatingAdmissionPolicyRenderer ?? ValidatingAdmissionPolicyRenderer
   const ValidatingAdmissionPolicyBindingComp = rendererOverrides?.ValidatingAdmissionPolicyBindingRenderer ?? ValidatingAdmissionPolicyBindingRenderer
@@ -919,14 +939,15 @@ export function ResourceRendererDispatch({
         {kind === 'persistentvolumes' && <PersistentVolumeRenderer data={data} onNavigate={onNavigate} />}
         {kind === 'storageclasses' && <StorageClassRenderer data={data} />}
         {kind === 'certificaterequests' && <CertificateRequestRenderer data={data} />}
+        {kind === 'certificatesigningrequests' && isCertificateSigningRequest(data) && <CertificateSigningRequestRenderer data={data} details={certificateSigningRequest} />}
         {kind === 'clusterissuers' && <ClusterIssuerRenderer data={data} />}
         {kind === 'issuers' && <IssuerRenderer data={data} />}
         {kind === 'orders' && <OrderRenderer data={data} />}
         {kind === 'challenges' && <ChallengeRenderer data={data} />}
         {kind === 'gateways' && groupGatedMatched && (isApiGroup(data.apiVersion, 'networking.istio.io') ? <IstioGatewayRenderer data={data} /> : <GatewayRenderer data={data} onNavigate={onNavigate} />)}
         {kind === 'gatewayclasses' && <GatewayClassRenderer data={data} />}
-        {kind === 'httproutes' && <HTTPRouteRenderer data={data} onNavigate={onNavigate} />}
-        {kind === 'grpcroutes' && <GRPCRouteRenderer data={data} onNavigate={onNavigate} />}
+        {kind === 'httproutes' && groupGatedMatched && <HTTPRouteComp data={data} onNavigate={onNavigate} />}
+        {kind === 'grpcroutes' && groupGatedMatched && <GRPCRouteRenderer data={data} onNavigate={onNavigate} />}
         {kind === 'tcproutes' && <SimpleRouteRenderer data={data} kind="TCPRoute" onNavigate={onNavigate} />}
         {kind === 'tlsroutes' && <SimpleRouteRenderer data={data} kind="TLSRoute" onNavigate={onNavigate} />}
         {kind === 'udproutes' && <SimpleRouteRenderer data={data} kind="UDPRoute" onNavigate={onNavigate} />}
@@ -1112,6 +1133,7 @@ export function ResourceRendererDispatch({
         {kind === 'instrumentations' && isApiGroup(data?.apiVersion, 'opentelemetry.io') && <OpenTelemetryInstrumentationRenderer data={data} />}
         {kind === 'canaries' && isApiGroup(data?.apiVersion, 'flagger.app') && <FlaggerCanaryRenderer data={data} onNavigate={onNavigate} />}
         {kind === 'metrictemplates' && isApiGroup(data?.apiVersion, 'flagger.app') && <FlaggerMetricTemplateRenderer data={data} onNavigate={onNavigate} />}
+        {kind === 'secretproviderclasses' && isApiGroup(data?.apiVersion, SECRETS_STORE_GROUP) && <SecretProviderClassComp data={data} onNavigate={onNavigate} />}
 
         {/* Generic renderer for CRDs and unknown resource types — also fires
             for known-plural collisions where no apiVersion-gated renderer
@@ -1181,6 +1203,9 @@ export function getResourceStatus(kind: string, data: any): { text: string; colo
     if (k === 'instrumentations') return getOpenTelemetryInstrumentationStatus(data)
   }
   if (k === 'canaries' && isApiGroup(data.apiVersion, 'flagger.app')) return getFlaggerCanaryStatus(data)
+  // A SecretProviderClass is configuration with no status of its own; mount
+  // state belongs to each Pod and is shown in the Pod drawer.
+  if (k === 'secretproviderclasses' && isApiGroup(data.apiVersion, SECRETS_STORE_GROUP)) return null
   if (k === 'pods') return getPodStatus(data)
   if (['deployments', 'statefulsets', 'daemonsets', 'rollouts'].includes(k)) {
     return getWorkloadDisplayStatus(data, k).status
@@ -1272,6 +1297,7 @@ export function getResourceStatus(kind: string, data: any): { text: string; colo
   }
   if (k === 'persistentvolumes') return getPVStatus(data)
   if (k === 'certificaterequests') return getCertificateRequestStatus(data)
+  if (k === 'certificatesigningrequests' && isCertificateSigningRequest(data)) return getCertificateSigningRequestStatus(data)
   if (k === 'clusterissuers') return getClusterIssuerStatus(data)
   if (k === 'issuers') return getIssuerStatus(data)
   if (k === 'orders') return getOrderState(data)
@@ -1281,7 +1307,8 @@ export function getResourceStatus(kind: string, data: any): { text: string; colo
     if (isApiGroup(data.apiVersion, 'gateway.networking.k8s.io')) return getGatewayStatus(data)
   }
   if (k === 'gatewayclasses') return getGatewayClassStatus(data)
-  if (k === 'httproutes' || k === 'grpcroutes' || k === 'tcproutes' || k === 'tlsroutes' || k === 'udproutes') return getRouteStatus(data)
+  if ((k === 'httproutes' || k === 'grpcroutes') && isApiGroup(data.apiVersion, 'gateway.networking.k8s.io')) return getRouteStatus(data)
+  if (k === 'tcproutes' || k === 'tlsroutes' || k === 'udproutes') return getRouteStatus(data)
   if (k === 'sealedsecrets') return getSealedSecretStatus(data)
   if (k === 'poddisruptionbudgets') return getPDBStatus(data)
   const isFluxResource = getGitOpsTool(k, apiVersionToGroup(data.apiVersion)) === 'flux'

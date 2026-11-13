@@ -36,8 +36,10 @@ import {
   Network,
   Stethoscope,
   Coins,
+  Pause,
 } from 'lucide-react'
-import type { TimelineEvent, ResourceRef, Relationships, SelectedResource, ResolvedEnvFrom, Topology, TopologyNode, HPADiagnosis, WorkloadPodInfo } from '../../types'
+import { isPausedDeployment } from '../../utils/bulk-workload-actions'
+import type { TimelineEvent, ResourceRef, Relationships, SelectedResource, ResolvedEnvFrom, Topology, TopologyNode, HPADiagnosis, WorkloadPodInfo, CertificateSigningRequestDetails } from '../../types'
 import type { GitOpsStatus } from '../../types/gitops'
 import type { ReadGap } from '../../types/read-coverage'
 import { workloadHistoryNotes, type WorkloadHistoryCoverage } from '../../utils/workload-history-notes'
@@ -81,7 +83,7 @@ import {
   isKueueQueuedJob,
 } from '../resources/resource-utils'
 import { ServicePortCards, type ServicePortRenderProps } from '../resources/renderers/ServiceRenderer'
-import { rolloutMayAdvanceAutomatically, type WorkloadRolloutActivity } from '../../utils/workload-rollout'
+import { isRolloutActivityVisible, rolloutMayAdvanceAutomatically, type WorkloadRolloutActivity } from '../../utils/workload-rollout'
 import { WorkloadRolloutNotice } from './WorkloadRolloutNotice'
 import { isCoreBatchJob } from '../../utils/api-resources'
 import { formatRelativeAgeTime } from '../../utils/format'
@@ -192,6 +194,8 @@ interface WorkloadViewProps {
   relationships?: Relationships
   /** TLS certificate info for secrets */
   certificateInfo?: any
+  /** Decoded request and certificate for CertificateSigningRequest detail responses */
+  certificateSigningRequest?: CertificateSigningRequestDetails
   /** HPA diagnosis for HorizontalPodAutoscaler detail responses */
   hpaDiagnosis?: HPADiagnosis
   /** Compact diagnosis for autoscalers controlling this workload */
@@ -473,6 +477,7 @@ export function WorkloadView({
   resource,
   relationships,
   certificateInfo,
+  certificateSigningRequest,
   hpaDiagnosis,
   scalerDiagnostics,
   workloadPods,
@@ -886,6 +891,17 @@ export function WorkloadView({
   // A 404 with a cached copy: the object was deleted while this view was
   // open. Everything below that copy describes the past.
   const resourceGone = Boolean(resource) && isFetchError(resourceError) && resourceError.status === 404
+  // A held rollout already reads "Rollout paused" in the status chip. With nothing
+  // pending the chip shows plain health, so this badge is the only paused signal.
+  const statusSaysRolloutPaused = rolloutActivity?.phase === 'paused' && isRolloutActivityVisible(rolloutActivity)
+  const deploymentPausedBadge = !resourceGone && !statusSaysRolloutPaused && isPausedDeployment(resource) && (
+    <Tooltip content="Pod template changes wait until the rollout is resumed">
+      <Badge severity="warning" className="gap-1 whitespace-nowrap">
+        <Pause className="w-3 h-3 shrink-0" aria-hidden />
+        Paused
+      </Badge>
+    </Tooltip>
+  )
   const status = resourceGone
     ? { text: 'Deleted', color: 'status-unknown' }
     : rolloutDisplay?.status ?? getResourceStatus(apiKind, resource)
@@ -1025,6 +1041,7 @@ export function WorkloadView({
                 </span>
               )}
               {!resourceGone && crossplaneResource && <CrossplanePauseChip state={getCrossplanePauseState(resource)} />}
+              {deploymentPausedBadge}
             </div>
             <div className="flex shrink-0 flex-nowrap items-center justify-end gap-1.5">
               {diagnoseAction}
@@ -1178,6 +1195,7 @@ export function WorkloadView({
                 relationships={rendererRelationships}
                 trackedBy={trackedBy}
                 certificateInfo={certificateInfo}
+                certificateSigningRequest={certificateSigningRequest}
                 hpaDiagnosis={hpaDiagnosis}
                 scalerDiagnostics={scalerDiagnostics}
                 workloadPods={workloadPods}
@@ -1264,6 +1282,7 @@ export function WorkloadView({
               </span>
             )}
             {!resourceGone && crossplaneResource && <CrossplanePauseChip state={getCrossplanePauseState(resource)} />}
+            {deploymentPausedBadge}
             {!resourceGone && statusNote}
           </>
         )
@@ -1405,6 +1424,7 @@ export function WorkloadView({
               relationships={rendererRelationships}
               trackedBy={trackedBy}
               certificateInfo={certificateInfo}
+              certificateSigningRequest={certificateSigningRequest}
               hpaDiagnosis={hpaDiagnosis}
               scalerDiagnostics={scalerDiagnostics}
               workloadPods={workloadPods}
@@ -2051,6 +2071,7 @@ function InfoTab({
   relationships,
   trackedBy,
   certificateInfo,
+  certificateSigningRequest,
   hpaDiagnosis,
   scalerDiagnostics,
   workloadPods,
@@ -2089,6 +2110,7 @@ function InfoTab({
   relationships?: Relationships
   trackedBy?: string
   certificateInfo?: any
+  certificateSigningRequest?: CertificateSigningRequestDetails
   hpaDiagnosis?: HPADiagnosis
   scalerDiagnostics?: ScalerDiagnosis[]
   workloadPods?: WorkloadPodInfo[]
@@ -2145,6 +2167,7 @@ function InfoTab({
           relationships={relationships}
           trackedBy={trackedBy}
           certificateInfo={certificateInfo}
+          certificateSigningRequest={certificateSigningRequest}
           hpaDiagnosis={hpaDiagnosis}
           scalerDiagnostics={scalerDiagnostics}
           onCopy={onCopy}

@@ -35,6 +35,7 @@ import type {
 import { focusManager, useInfiniteQuery, useQuery, useMutation, useQueryClient, skipToken, type QueryClient } from '@tanstack/react-query'
 import { showApiError, showApiSuccess, showApiNotice } from '../components/ui/Toast'
 import { useIsAuthEnabled, useNamespacedCapabilities } from '../contexts/CapabilitiesContext'
+import { applyTabPick, cleanPick, ownsTabPick, pruneTabPick, withActives, writeTabPick } from '../utils/namespacePick'
 import type {
   Topology,
   ClusterInfo,
@@ -427,7 +428,12 @@ export async function fetchJSON<T>(
 // ============================================================================
 
 export interface DashboardCluster {
+  // Kubeconfig context, or "in-cluster". The kubeconfig cluster entry is in
+  // kubeconfigCluster.
   name: string;
+  // Kubeconfig cluster entry the context points at; several contexts can
+  // share one. Absent in in-cluster mode and from older Radar.
+  kubeconfigCluster?: string;
   platform: string;
   version: string;
   connected: boolean;
@@ -526,6 +532,8 @@ export interface DashboardHelmRelease {
   chartVersion: string;
   status: string;
   resourceHealth?: string;
+  // Workloads and Pods whose live status wasn't read.
+  statusUnreadCount?: number;
 }
 
 export interface DashboardHelmSummary {
@@ -937,6 +945,7 @@ export interface CronJobSchedulingEvidence {
 }
 
 export interface SubjectIssuesResponse {
+	node_certificate_report?: NodeCertificateReport;
   scheduling_report?: CronJobSchedulingEvidence;
   issues: Issue[];
   coverage: "ok" | "syncing" | "notWatched" | "unknownKind";
@@ -944,6 +953,19 @@ export interface SubjectIssuesResponse {
   visibility?: { state?: string; impact?: string };
   /** Checks about this resource Radar couldn't make for the caller. */
   unchecked_sources?: UncheckedSource[];
+}
+
+export interface NodeCertificateReport {
+  uid: string;
+  event_id?: string;
+  state: 'reported' | 'unverified' | 'ok';
+  reason: string;
+  message: string;
+  last_reported_at: string;
+  expires_at?: string;
+  not_before?: string;
+  history_incomplete?: boolean;
+  validity_unknown?: boolean;
 }
 
 export function useSubjectIssues(
@@ -1140,7 +1162,8 @@ export interface OpenCostNamespaceCost {
   hourlyCost: number;
   cpuCost: number;
   memoryCost: number;
-  storageCost?: number;
+  // null: the namespace has volumes whose cost could not be calculated.
+  storageCost?: number | null;
   cpuUsageCost?: number;
   memoryUsageCost?: number;
   efficiency?: number;
@@ -1175,7 +1198,8 @@ export interface OpenCostSummary {
   currency?: string;
   window?: string;
   totalHourlyCost?: number;
-  totalStorageCost?: number;
+  // null: at least one namespace's storage cost is unknown.
+  totalStorageCost?: number | null;
   totalIdleCost?: number;
   clusterEfficiency?: number;
   namespaceScope?: string[];
@@ -1872,6 +1896,12 @@ export interface VersionInfo {
   releaseNotes?: string;
   installMethod: InstallMethod;
   updateCommand?: string;
+  /**
+   * Desktop install that cannot update itself, and how the user updates instead:
+   * a new AppImage, a new .deb/.rpm through the package manager, or a download
+   * because Radar can't write to its folder. Absent: Update Now works.
+   */
+  manualUpdate?: 'appimage' | 'package' | 'download';
   error?: string;
   productHuntLaunch?: { enabled: boolean; url: string; start: string; end: string };
 }
@@ -3911,7 +3941,8 @@ export type RightsizingFit =
   | "oversized"
   | "under_requested"
   | "missing_request"
-  | "insufficient_history";
+  | "insufficient_history"
+  | "pod_level_request";
 export type RightsizingConfidence = "low" | "medium" | "high";
 export type RightsizingOwnerCoverage = "ksm_history" | "current_pods";
 
@@ -3924,6 +3955,9 @@ export interface RightsizingRow {
   currentRequestValue?: number;
   currentLimit?: string;
   currentLimitValue?: number;
+  /** The pod's fixed pod-level request (spec.resources), set when fit is pod_level_request. */
+  podLevelRequest?: string;
+  podLevelRequestValue?: number;
   observed?: {
     name: "P95" | "P99" | "Max";
     value: number;
@@ -5373,8 +5407,7 @@ export function useRestartWorkload() {
         },
       );
       if (!response.ok) {
-        const error = await readErrorBody(response);
-        throw new Error(error.error || `HTTP ${response.status}`);
+        throw new Error(restartErrorMessage(await readErrorBody(response), response.status));
       }
       return response.json();
     },
@@ -5388,6 +5421,63 @@ export function useRestartWorkload() {
       });
       queryClient.invalidateQueries({ queryKey: ["topology"] });
     },
+  });
+}
+
+function useSetDeploymentPaused(
+  action: "pause" | "resume",
+  meta: { errorMessage: string; successMessage: string },
+) {
+  const queryClient = useQueryClient();
+  const { guard } = useRadarFeature("deploymentPause");
+
+  return useMutation({
+    mutationFn: ({
+      kind,
+      namespace,
+      name,
+    }: {
+      kind: string;
+      namespace: string;
+      name: string;
+    }) =>
+      guard(async () => {
+        const response = await apiFetch(
+          `${getApiBase()}/workloads/${kind}/${namespace}/${name}/${action}`,
+          {
+            method: "POST",
+          },
+        );
+        if (!response.ok) {
+          const error = await readErrorBody(response);
+          throw new Error(error.error || `HTTP ${response.status}`);
+        }
+        return response.json();
+      }),
+    meta,
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({
+        queryKey: ["resources", variables.kind],
+      });
+      queryClient.invalidateQueries({
+        queryKey: ["resource", variables.kind, variables.namespace, variables.name],
+      });
+      queryClient.invalidateQueries({ queryKey: ["topology"] });
+    },
+  });
+}
+
+export function usePauseDeployment() {
+  return useSetDeploymentPaused("pause", {
+    errorMessage: "Failed to pause rollout",
+    successMessage: "Rollout paused",
+  });
+}
+
+export function useResumeDeployment() {
+  return useSetDeploymentPaused("resume", {
+    errorMessage: "Failed to resume rollout",
+    successMessage: "Rollout resumed",
   });
 }
 
@@ -5558,6 +5648,46 @@ export function useWorkloadRevisions(
   });
 }
 
+// A rollout can start long after its request returned, as when a resume releases
+// a held template, so nothing in the request says when its revision exists. The
+// controller records the Deployment's revision only after creating that ReplicaSet.
+// deploymentRevision is undefined until the resource loads, and empty on a loaded
+// Deployment with no revision yet, which is how one created paused starts out.
+export function useRefreshRevisionsOnNewRollout(
+  kind: string,
+  namespace: string,
+  name: string,
+  deploymentRevision: string | undefined,
+) {
+  const queryClient = useQueryClient();
+  const seen = useRef(deploymentRevision);
+
+  useEffect(() => {
+    const previous = seen.current;
+    seen.current = deploymentRevision;
+    if (previous === undefined || deploymentRevision === undefined || previous === deploymentRevision) return;
+    queryClient.invalidateQueries({
+      queryKey: ["workload-revisions", kind, namespace, name],
+    });
+  }, [queryClient, kind, namespace, name, deploymentRevision]);
+}
+
+// The server's paused-refusal text is written for API and agent callers; in the
+// UI the way out is the Resume rollout button on the same page.
+export function rollbackErrorMessage(body: { error?: string; error_code?: string }, status: number): string {
+  if (body.error_code === "workload_paused") {
+    return "This Deployment is paused. Click Resume rollout, then roll back.";
+  }
+  return body.error || `HTTP ${status}`;
+}
+
+export function restartErrorMessage(body: { error?: string; error_code?: string }, status: number): string {
+  if (body.error_code === "workload_paused") {
+    return "This Deployment is paused. Click Resume rollout, then restart.";
+  }
+  return body.error || `HTTP ${status}`;
+}
+
 export function useRollbackWorkload() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -5581,8 +5711,7 @@ export function useRollbackWorkload() {
         },
       );
       if (!response.ok) {
-        const error = await readErrorBody(response);
-        throw new Error(error.error || `HTTP ${response.status}`);
+        throw new Error(rollbackErrorMessage(await readErrorBody(response), response.status));
       }
       return response.json();
     },
@@ -7531,8 +7660,20 @@ export function useSwitchContext() {
 // ============================================================================
 
 export interface NamespaceScope {
+  /**
+   * This tab's pick. Outside --namespace-scope it is the tab's own (see
+   * utils/namespacePick); the server's remembered pick only seeds it.
+   */
   actives: string[];
   kubeconfigNamespace: string;
+  /** Context the scope was read under. Absent from servers older than per-tab picks. */
+  context?: string;
+  /**
+   * True when the server drops its own pick to `accessibleNamespaces` on this
+   * read; a tab drops its pick under the same rule. Absent from servers older
+   * than per-tab picks.
+   */
+  accessChecked?: boolean;
   /**
    * 'cluster-wide' — no per-user pick; user can list across namespaces.
    * 'namespace'    — per-user view filter pinned to one or more namespaces.
@@ -7556,7 +7697,11 @@ export interface NamespaceScope {
 export function useNamespaceScope() {
   return useQuery<NamespaceScope>({
     queryKey: ["namespace-scope"],
-    queryFn: () => fetchJSON("/cluster/namespace-scope"),
+    queryFn: async ({ signal }) => {
+      const apiBase = getApiBase();
+      const scope = await fetchJSON<NamespaceScope>("/cluster/namespace-scope", signal);
+      return applyTabPick(scope, apiBase);
+    },
     staleTime: 30000,
   });
 }
@@ -7619,9 +7764,34 @@ export async function refreshAfterNamespaceSwitch(
   await queryClient.invalidateQueries({ predicate: notScope }, { cancelRefetch: false });
 }
 
+// Per apiBase, the last namespace switch this tab started, and the newest one
+// whose answer it applied. Answers can arrive out of order: an older switch
+// must not overwrite a newer one that already landed, but it still applies
+// while the newer one is in flight, in case that one is refused.
+const startedNamespaceSwitch = new Map<string, number>();
+const appliedNamespaceSwitch = new Map<string, number>();
+
+export interface NamespaceSwitchStart {
+  seq: number;
+  apiBase: string;
+  context: string | undefined;
+}
+
+/** True while `start` is the newest namespace switch this tab has applied. */
+export function isAppliedNamespaceSwitch(start: NamespaceSwitchStart | undefined): boolean {
+  return !start || appliedNamespaceSwitch.get(start.apiBase) === start.seq;
+}
+
+/** Records `start` as applied unless a newer switch already landed. */
+function claimNamespaceSwitch(start: NamespaceSwitchStart): boolean {
+  if (start.seq < (appliedNamespaceSwitch.get(start.apiBase) ?? 0)) return false;
+  appliedNamespaceSwitch.set(start.apiBase, start.seq);
+  return true;
+}
+
 export function useSetActiveNamespace() {
   const queryClient = useQueryClient();
-  return useMutation<NamespaceScope, Error, { namespaces: string[] }>({
+  return useMutation<NamespaceScope, Error, { namespaces: string[] }, NamespaceSwitchStart>({
     meta: {
       // Surface 403s (RBAC drift, denied bookmark) and network errors via the
       // global toast. Without this, App.tsx call sites that mutate without
@@ -7665,7 +7835,9 @@ export function useSetActiveNamespace() {
           const error = await readErrorBody(response);
           throw new Error(error.error || `HTTP ${response.status}`);
         }
-        return response.json();
+        // Awaited so a body lost in transfer reaches the catch below.
+        const scope: NamespaceScope = await response.json();
+        return scope;
       } catch (error) {
         clearTimeout(timeoutId);
         debugNamespaceLog("mutation:error", {
@@ -7688,10 +7860,45 @@ export function useSetActiveNamespace() {
             { cause: error },
           );
         }
+        // A network failure can hide a write the server already made; its
+        // scope says whether the pick landed. A refused pick (HTTP error) did
+        // not land.
+        if (!isRescope && error instanceof TypeError) {
+          const applied = await reconcileNamespaceSwitch(namespaces);
+          if (applied) {
+            debugNamespaceLog("mutation:network-error-but-applied", { namespaces });
+            return applied;
+          }
+        }
         throw error;
       }
     },
-    onSuccess: (scope) => {
+    onMutate: () => {
+      const apiBase = getApiBase();
+      const seq = (startedNamespaceSwitch.get(apiBase) ?? 0) + 1;
+      startedNamespaceSwitch.set(apiBase, seq);
+      const context = queryClient.getQueryData<NamespaceScope>(["namespace-scope"])?.context;
+      return { seq, apiBase, context };
+    },
+    onSuccess: (response, { namespaces }, start) => {
+      let scope = response;
+      if (ownsTabPick(response)) {
+        // The response renders the server's stored pick after the write, which
+        // another tab can change in between, and its context is read after the
+        // write too. Record what this tab asked for, under the context it
+        // asked in.
+        const context = start.context ?? response.context;
+        const cached = queryClient.getQueryData<NamespaceScope>(["namespace-scope"]);
+        // A context switch landed meanwhile: the tab starts again from the
+        // server's pick for the new context.
+        if (getApiBase() !== start.apiBase || (cached && cached.context !== context) || response.context !== context) return;
+        if (!claimNamespaceSwitch(start)) return;
+        const picked = pruneTabPick(response, cleanPick(namespaces));
+        writeTabPick(start.apiBase, context, picked);
+        scope = withActives(response, picked);
+      } else {
+        claimNamespaceSwitch(start);
+      }
       debugNamespaceLog("mutation:success-before-scope-cache-write", {
         actives: scope.actives,
         mode: scope.mode,

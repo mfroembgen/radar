@@ -1021,6 +1021,49 @@ They roll up under three categories, split by what you'd go and look at: `backup
 
 ---
 
+## Secrets Store CSI Driver
+
+The [Secrets Store CSI Driver](https://secrets-store-csi-driver.sigs.k8s.io/) mounts secrets from an external store (Vault, AWS, Azure, GCP and others) into Pods as a CSI volume. A volume with `csi.driver: secrets-store.csi.k8s.io` names a SecretProviderClass in the Pod's namespace; after a successful mount the driver writes a SecretProviderClassPodStatus owned by that Pod.
+
+### What Radar Shows
+
+**Pod Detail View — Secrets Store CSI section** (only for Pods with such a volume):
+- Each volume, the containers and paths that mount it, and a link to its SecretProviderClass
+- The class's provider and synced Kubernetes Secrets (names, types and keys)
+- Mount state from the driver status matched by the Pod's UID and class, with object IDs and versions
+- The kubelet's latest `FailedMount` message for that volume while the Pod waits
+
+| State | Source |
+|---|---|
+| Mounted | SecretProviderClassPodStatus with `mounted: true`, owned by this Pod |
+| Mount failed | Warning `FailedMount` event naming the volume, while the Pod has not started |
+| Not mounted yet | Pod pending, no status and no failure event |
+| Mount not recorded | Pod started but the driver wrote no status for it |
+| Status shared | Another volume of this Pod uses the same class. The driver keeps one status per Pod and class, naming only the volume mounted last, so this volume has none of its own |
+| Class not found | A complete read of the namespace's classes has no class with that name |
+| No permission / could not read all / unavailable | The class or status read was denied, partial, or the API is not served |
+
+The driver never writes a status for a failed or pending mount, so a missing status is never shown as success. A status left by an earlier Pod with the same name is ignored.
+
+**SecretProviderClass Detail View:**
+- Provider and synced Secrets (names, types and keys)
+- Pods in the namespace whose volumes name the class, with each Pod's mount state
+
+Provider `parameters` are not summarized. This is presentation only, not a redaction boundary: the YAML view and REST/MCP reads return the full object to callers who can read it.
+
+### Supported CRDs
+
+| CRD | Group | Topology | Detail View | AI Summary |
+|-----|-------|----------|-------------|------------|
+| SecretProviderClass | `secrets-store.csi.x-k8s.io/v1` | — | Yes | — |
+| SecretProviderClassPodStatus | `secrets-store.csi.x-k8s.io/v1` | — | Pod drawer | — |
+
+Collection is on by default in the Helm chart (`rbac.crdGroups.secretsStoreCsi`) and reads only these two kinds. For Radar Cloud callers, SecretProviderClass is withheld from the default integration-read grants (its `parameters` are free-form) and SecretProviderClassPodStatus is granted; see [the default read policy](cloud-rbac-baseline.md).
+
+Tested with driver 1.6.1 and the HashiCorp Vault provider (chart 0.34.1) on kind.
+
+---
+
 ## Strimzi Kafka connectors
 
 Connector details separate desired settings from the operator-reported connector and task states, show worker addresses and optional automatic-restart history, and link to KafkaConnect. Failed tasks override an otherwise Ready badge; stale, paused or incomplete observations never establish health. The view reads the existing custom resource without contacting Kafka Connect or requiring application credentials.
@@ -1561,6 +1604,30 @@ chart.
 
 ---
 
+## Certificate Signing Requests
+
+[CertificateSigningRequests](https://kubernetes.io/docs/reference/access-authn-authz/certificate-signing-requests/) are how kubelets and other clients ask a signer for an X.509 certificate. This is the built-in, cluster-scoped `certificates.k8s.io/v1` API, not a CRD; Radar lists it under **Other Kubernetes APIs**. Support is read-only: Radar does not approve, deny or sign requests.
+
+### What Radar Shows
+
+**Status:** The table, the detail header, MCP and AI context share one reading, the one `kubectl` and client-go's `WaitForCertificate` use: **Pending approval**, **Approved, not issued** (approved, but the signer has not returned a certificate), **Issued**, **Denied** and **Failed**. Denied and Failed are final, and a certificate counts as issued only once the request is Approved. Waiting for an approver or a signer does not raise an Issue.
+
+**Detail View:** The deciding condition's reason, message and time; the signer, usages and requested duration; the requester (username, UID, groups and extra) as the API server recorded it; the identity decoded from the PKCS#10 request (subject, organizations, DNS/IP/email/URI SANs, key and signature algorithm), labelled as what was asked for rather than what was authorized or issued; and each returned certificate (subject, SANs, issuer, serial and validity) in the same view TLS Secrets use. Missing, malformed or partly unreadable data is reported as such, never as "no certificate".
+
+**Resource Browser:** Status, signer and requester columns.
+
+**AI Summary:** `list_resources` reports the state with the signer as `type`; `get_resource` replaces the base64 PEM payloads with what they decode to. See [MCP](mcp.md#certificatesigningrequests).
+
+**RBAC:** The Helm chart grants read-only `get/list/watch` on `certificatesigningrequests` together with RBAC objects: with authentication on or in cloud mode, or with `rbac.viewRBAC: true` on a no-auth install. Without it, the CertificateSigningRequest list is not shown. Radar Cloud's default tier bindings withhold it because a request records its requester's identity; see [the default read policy](cloud-rbac-baseline.md).
+
+### Supported Kinds
+
+| Kind | Group | Topology | Detail View | AI Summary |
+|------|-------|----------|-------------|------------|
+| CertificateSigningRequest | `certificates.k8s.io` (v1) | — | Yes | Yes |
+
+---
+
 ## NVIDIA GPU Operator
 
 The [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/) manages the GPU software stack (driver, container toolkit, device plugin, DCGM) on Kubernetes.
@@ -1703,6 +1770,30 @@ either grant is enough to read it.
 ### Calico Coverage Limits
 
 Radar statically evaluates Calico selectors against workload pod templates and the Namespace and ServiceAccount objects it can read. The result describes declared policy coverage, not live CNI enforcement or packet-level behavior. Missing labels or RBAC-restricted resources can prevent a relationship from being inferred, and staged policies are never included in enforced coverage. The projected "if staged" figure assumes every staged policy is promoted at once; it is a projection of the declared rules, not a simulation of what the data plane would do.
+
+---
+
+## Multus (secondary networks)
+
+[Multus](https://github.com/k8snetworkplumbingwg/multus-cni) attaches extra network interfaces to a Pod. The Pod records what it asked for in the `k8s.v1.cni.cncf.io/networks` annotation and what Multus attached in `k8s.v1.cni.cncf.io/network-status`. OpenShift uses the same annotations for its secondary networks.
+
+### What Radar Shows
+
+**Detail View:** A Pod's **Secondary Networks** section lists each attachment with its interface, every IP address (so a dual-stack attachment shows both), MAC address and a default-network marker. Each row is labelled **Reported** when the `network-status` annotation lists it, **Requested only** when it does not, and a reported attachment that nothing requested says so. A definition name links to its `NetworkAttachmentDefinition` when Radar can read it; otherwise the row says the definition was not found, that you lack permission to read it, or that it could not be checked.
+
+The `networks` annotation may be a comma-separated list (`name`, `namespace/name`, `name@interface`) or a JSON list. A definition attached more than once appears once per attachment. A name without a namespace is read as the Pod's namespace. An annotation Radar cannot read is shown with the reason and its raw value, never as "no networks". The section does not appear for a Pod that only has its default network, which is every Pod on some clusters.
+
+Requested is not attached, and a reported interface does not show that the Pod can reach anything on that network.
+
+**Helm:** `rbac.crdGroups.multus` (default on) grants read on `network-attachment-definitions` in `k8s.cni.cncf.io`, and nothing else in that group.
+
+Topology, Issues, MCP summaries and `MultiNetworkPolicy` are not covered.
+
+### Supported CRDs
+
+| CRD | Group | Topology | Detail View | AI Summary |
+|-----|-------|----------|-------------|------------|
+| NetworkAttachmentDefinition | `k8s.cni.cncf.io/v1` | No | Generic, linked from the Pod | — |
 
 ---
 

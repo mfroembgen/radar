@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -249,12 +250,23 @@ func TestRollbackResult(t *testing.T) {
 		t.Fatalf("no-op message = %q", msg)
 	}
 
-	if _, err := rollbackResult("deployments", "ns", "web", 2, k8score.ErrWorkloadPaused); err == nil || !strings.Contains(err.Error(), "rollback failed") {
-		t.Fatalf("paused rollback error = %v, want a failure", err)
+	paused := fmt.Errorf("Deployment ns/web: %w", k8score.ErrWorkloadPaused)
+	if _, err := rollbackResult("deployments", "ns", "web", 2, paused); err == nil || !errors.Is(err, k8score.ErrWorkloadPaused) || !strings.Contains(err.Error(), "action=resume") {
+		t.Fatalf("paused rollback error = %v, want a failure that names action=resume", err)
 	}
 
 	resp, err = rollbackResult("deployments", "ns", "web", 2, nil)
 	if err != nil || resp["status"] != "ok" || resp["next"] == nil {
 		t.Fatalf("success result = %v, %v", resp, err)
+	}
+}
+
+func TestRestartFailureNamesResumeForAPausedDeployment(t *testing.T) {
+	paused := fmt.Errorf("Deployment ns/web: %w", k8score.ErrRestartPaused)
+	if err := restartFailure(paused); !errors.Is(err, k8score.ErrRestartPaused) || !strings.Contains(err.Error(), "action=resume") {
+		t.Fatalf("paused restart error = %v, want a failure that names action=resume", err)
+	}
+	if err := restartFailure(errors.New("forbidden")); strings.Contains(err.Error(), "action=resume") {
+		t.Fatalf("other restart error = %v, should not point at resume", err)
 	}
 }

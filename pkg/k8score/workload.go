@@ -806,9 +806,10 @@ func (m *WorkloadManager) RestartWorkload(ctx context.Context, kind, namespace, 
 	if m.dynClient == nil {
 		return fmt.Errorf("dynamic client not initialized")
 	}
+	normalizedKind := NormalizeWorkloadKind(strings.ToLower(kind))
 	// A Rollout's restart is spec.restartAt; the pod-template annotation below
 	// would change the template hash and re-run every canary step instead.
-	if NormalizeWorkloadKind(kind) == "rollouts" {
+	if normalizedKind == "rollouts" {
 		_, err := rollouts.Restart(ctx, m.dynClient, namespace, name)
 		return err
 	}
@@ -822,6 +823,16 @@ func (m *WorkloadManager) RestartWorkload(ctx context.Context, kind, namespace, 
 		return fmt.Errorf("unknown resource kind: %s", kind)
 	}
 
+	if normalizedKind == "deployments" {
+		deployment, err := m.dynClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to restart workload: %w", err)
+		}
+		if paused, _, _ := unstructured.NestedBool(deployment.Object, "spec", "paused"); paused {
+			return fmt.Errorf("Deployment %s/%s: %w", namespace, name, ErrRestartPaused)
+		}
+	}
+
 	restartTime := time.Now().Format(time.RFC3339)
 	patch := fmt.Sprintf(`{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":"%s"}}}}}`, restartTime)
 
@@ -830,6 +841,32 @@ func (m *WorkloadManager) RestartWorkload(ctx context.Context, kind, namespace, 
 	)
 	if err != nil {
 		return fmt.Errorf("failed to restart workload: %w", err)
+	}
+
+	return nil
+}
+
+// SetDeploymentPaused sets spec.paused on a Deployment, as kubectl rollout pause
+// and resume do. The API server treats a patch to the value already set as a
+// no-op, so a repeated call succeeds and changes nothing without a prior read.
+func (m *WorkloadManager) SetDeploymentPaused(ctx context.Context, namespace, name string, paused bool) error {
+	if m.dynClient == nil {
+		return fmt.Errorf("dynamic client not initialized")
+	}
+	if m.discovery == nil {
+		return fmt.Errorf("resource discovery not initialized")
+	}
+
+	deploymentGVR, ok := m.discovery.GetGVR("deployments")
+	if !ok {
+		return fmt.Errorf("deployments resource not found")
+	}
+
+	patch := fmt.Sprintf(`{"spec":{"paused":%t}}`, paused)
+	if _, err := m.dynClient.Resource(deploymentGVR).Namespace(namespace).Patch(
+		ctx, name, types.MergePatchType, []byte(patch), metav1.PatchOptions{},
+	); err != nil {
+		return fmt.Errorf("failed to patch deployment: %w", err)
 	}
 
 	return nil
@@ -1304,7 +1341,12 @@ func (m *WorkloadManager) RollbackWorkload(ctx context.Context, kind, namespace,
 // ErrWorkloadPaused: a paused Deployment would hold a restored template without
 // rolling it out, so a rollback that reports success would change nothing.
 // kubectl rollout undo refuses for the same reason.
-var ErrWorkloadPaused = errors.New("workload is paused; resume it first (kubectl rollout resume, or set spec.paused to false) and retry, because a paused Deployment holds a new template without rolling it out")
+var ErrWorkloadPaused = errors.New("the Deployment is paused, so a rollback would not roll out; resume it, then roll back")
+
+// ErrRestartPaused: a paused Deployment would record the restart without
+// rolling it out, and then roll it out on the next resume. kubectl rollout
+// restart refuses for the same reason.
+var ErrRestartPaused = errors.New("the Deployment is paused, so a restart would not roll out; resume it, then restart")
 
 // deploymentRollbackKeptAnnotations are the Deployment annotations a rollback keeps
 // from the live object; every other annotation is restored from the target

@@ -182,9 +182,11 @@ type FeatureCapabilities struct {
 	ResourceReadCoverage  bool `json:"resourceReadCoverage"`
 	SearchCoverage        bool `json:"searchCoverage"`
 	ApplicationEvidence   bool `json:"applicationEvidence"`
+	SearchEventContent    bool `json:"searchEventContent"`
 	YAMLReview            bool `json:"yamlReview"`
 	YAMLSchemas           bool `json:"yamlSchemas"`
 	WorkloadImages        bool `json:"workloadImages"`
+	DeploymentPause       bool `json:"deploymentPause"`
 	ResourceIssues        bool `json:"resourceIssues"`        // GET /api/issues/resource/{kind}/{namespace}/{name}
 	ResourceIssueCoverage bool `json:"resourceIssueCoverage"` // Resource issues with ?coverage=1
 	PodEnvironment        bool `json:"podEnvironment"`        // GET /api/pods/{namespace}/{name}/environment
@@ -225,6 +227,7 @@ type FeatureCapabilities struct {
 	// GET /api/kueue/clusterqueues/{name}/workloads and
 	// /api/kueue/localqueues/{namespace}/{name}/workloads
 	KueueQueueWorkloads bool `json:"kueueQueueWorkloads"`
+	PodFileUpload       bool `json:"podFileUpload"` // POST /api/pods/{namespace}/{name}/files/upload
 }
 
 // WorkloadWritePermissions indicates which workload resources the user can patch.
@@ -1219,7 +1222,8 @@ func mergeScopeCandidates(ctxNs, flagNs string, accessible []string, authoritati
 
 func mergeScopeCandidateLists(ctxNs string, flagNamespaces []string, accessible []string, authoritative bool) (out []string, dropped int) {
 	seen := map[string]bool{}
-	out = make([]string, 0, MaxScopeCandidates)
+	// MaxScopeCandidates is operator-set and can be huge; size by the input.
+	out = make([]string, 0, min(MaxScopeCandidates, 1+len(flagNamespaces)+len(accessible)))
 	atCap := false
 	add := func(ns string) {
 		if ns == "" || seen[ns] {

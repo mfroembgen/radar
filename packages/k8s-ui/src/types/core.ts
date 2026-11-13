@@ -174,9 +174,11 @@ export interface FeatureCapabilities {
   resourceReadCoverage?: boolean
   searchCoverage?: boolean
  applicationEvidence?: boolean
+  searchEventContent?: boolean
   yamlReview?: boolean
   yamlSchemas?: boolean
   workloadImages?: boolean
+  deploymentPause?: boolean
   resourceIssues?: boolean
   resourceIssueCoverage?: boolean
   podEnvironment?: boolean
@@ -199,6 +201,7 @@ export interface FeatureCapabilities {
   // Workload Pod info marks native sidecars (containerStatuses[].sidecar).
   podSidecarMarks?: boolean
   kueueQueueWorkloads?: boolean
+  podFileUpload?: boolean
 }
 
 // DeploymentMode is the closed set of topologies Radar can run in.
@@ -216,7 +219,7 @@ export interface Deployment {
 //
 // When adding a new kind here, also update:
 // - ALL_NODE_KINDS in App.tsx
-// - TopologyFilterSidebar.tsx RESOURCE_KINDS array
+// - resource-kind-colors.ts TOPOLOGY_RESOURCE_KINDS array
 // - K8sResourceNode.tsx NODE_DIMENSIONS
 // - resource-icons.ts KIND_ICON_MAP
 // - kindToPlural in navigation.ts (if irregular plural)
@@ -833,6 +836,48 @@ export interface SecretCertificateInfo {
   certificates: CertificateInfo[]
 }
 
+/** How much of a CertificateSigningRequest payload Radar could read (pkg/csr). */
+export type CSRDecodeStatus = 'absent' | 'decoded' | 'partial' | 'invalid'
+
+/** The PKCS#10 request: the identity its creator asked for, not what was approved or issued. */
+export interface CSRRequestDetails {
+  status: CSRDecodeStatus
+  error?: string
+  subject?: string
+  commonName?: string
+  organizations?: string[]
+  dnsNames?: string[]
+  ipAddresses?: string[]
+  emailAddresses?: string[]
+  uris?: string[]
+  /** Set when the request has a SAN extension but none of its names is a type Radar reads. */
+  unreadableSANs?: boolean
+  publicKey?: string
+  signatureAlgorithm?: string
+  /** Set when the request parses but is not signed by its own key. */
+  signatureError?: string
+}
+
+export interface CSRIssuedCertificate extends CertificateInfo {
+  /** The whole subject; CertificateInfo.subject keeps only the common name. */
+  subjectDN?: string
+  emailAddresses?: string[]
+  uris?: string[]
+}
+
+export interface CSRCertificateDetails {
+  status: CSRDecodeStatus
+  certificates?: CSRIssuedCertificate[]
+  /** Each part of status.certificate that is not a readable certificate. */
+  problems?: string[]
+}
+
+/** Decoded spec.request and status.certificate of a CertificateSigningRequest. */
+export interface CertificateSigningRequestDetails {
+  request: CSRRequestDetails
+  certificate: CSRCertificateDetails
+}
+
 export type HPADiagnosisState =
   | 'ok'
   | 'scaling_up'
@@ -923,6 +968,8 @@ export interface ResourceWithRelationships<T = unknown> {
   relationships?: Relationships
   certificateInfo?: SecretCertificateInfo
   hpaDiagnosis?: HPADiagnosis
+  /** Absent from Radar versions that predate CertificateSigningRequest decoding. */
+  certificateSigningRequest?: CertificateSigningRequestDetails
 }
 
 // API Resource (from discovery endpoint)
@@ -980,10 +1027,11 @@ export interface HelmRelease {
   resourceHealth?: 'healthy' | 'degraded' | 'unhealthy' | 'neutral' | 'unknown'
   healthIssue?: string    // Primary issue if unhealthy (e.g., "OOMKilled")
   healthSummary?: string  // Brief summary like "2/3 pods ready"
-  // When set, this release was installed by Flux's helm-controller — the
-  // user should manage it via the named HelmRelease CR (GitOps tab) rather
-  // than helm CLI / Radar's Helm view, since changes here would get
-  // reverted at the next reconcile. Format: "namespace/name".
+  /** Workloads and Pods whose live status wasn't read; other unread objects keep per-resource markers. */
+  statusUnreadCount?: number
+  // Flux ownership remains visible when the controller reference is withheld.
+  managedByFlux?: boolean
+  // Readable controller reference, in namespace/name form.
   managedByFluxHelmRelease?: string
 }
 
@@ -1053,6 +1101,8 @@ export interface HelmReleaseDetail {
   resourceHealth?: 'healthy' | 'degraded' | 'unhealthy' | 'neutral' | 'unknown'
   healthIssue?: string
   healthSummary?: string
+  /** See HelmRelease.statusUnreadCount. */
+  statusUnreadCount?: number
   hooks?: HelmHook[]
   hookDiagnostics?: HookDiagnostic[]
   readme?: string
@@ -1060,8 +1110,8 @@ export interface HelmReleaseDetail {
   lastOperation?: HelmOperation
   operations?: HelmOperation[]
   operationInsight?: HelmOperationInsight
-  // When set, this release was installed by Flux's helm-controller — see
-  // HelmRelease.managedByFluxHelmRelease for context. Format: "namespace/name".
+  // Ownership is retained even when the controller reference is withheld.
+  managedByFlux?: boolean
   managedByFluxHelmRelease?: string
 }
 
@@ -1160,6 +1210,8 @@ export interface HelmOwnedResource {
   message?: string  // Status message or reason
   summary?: string  // Brief status like "0/3 OOMKilled"
   issue?: string    // Primary issue if unhealthy (e.g., "OOMKilled")
+  /** Why the caller isn't shown this object's live status (a read code such as user_forbidden); release health doesn't count it. */
+  statusUnread?: string
 }
 
 export interface HelmValues {
@@ -1745,9 +1797,18 @@ export interface TrafficFlowsResponse {
    *  their values are missing or wrong, so show the warning next to them and do
    *  not refetch. 'incomplete' means the fetch worked but could not see
    *  everything — events lost, nodes unreachable — so flows may be missing; show
-   *  it, with or without flows, and do not retry at once. */
-  warningKind?: 'transient' | 'partial' | 'incomplete'
+   *  it, with or without flows, and do not retry at once. 'cluster' is about
+   *  which cluster the traffic belongs to in a metrics store shared by several:
+   *  why none of it could be tied to this cluster, or, beside flows, that they
+   *  may include other clusters'. It holds until the configuration changes, so
+   *  do not retry. */
+  warningKind?: TrafficWarningKind
+  /** Set when the warning includes a reason tied to keeping the map to this
+   *  cluster in a shared metrics store, so the view links to how that works. */
+  warningClusterScope?: boolean
 }
+
+export type TrafficWarningKind = 'transient' | 'partial' | 'incomplete' | 'cluster'
 
 // Response from GET /api/traffic/flows/records — the newest records behind
 // one graph selection.
@@ -1763,7 +1824,7 @@ export interface TrafficRecordsResponse {
   nodeFlowLimit?: number
   flowLimit?: number
   warning?: string
-  warningKind?: 'transient' | 'partial' | 'incomplete'
+  warningKind?: TrafficWarningKind
 }
 
 // Wizard state for traffic setup

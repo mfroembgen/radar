@@ -190,8 +190,19 @@ sudo apt install ./radar-desktop_*.deb
 
 **Fedora/RHEL** — download the `.rpm` from [GitHub Releases](https://github.com/skyhook-io/radar/releases), then:
 ```bash
-sudo rpm -i radar-desktop_*.rpm
+sudo dnf install ./radar-desktop_*.rpm
 ```
+
+**Linux (AppImage, any distro)** — download the `.AppImage` from [GitHub Releases](https://github.com/skyhook-io/radar/releases), then:
+```bash
+chmod +x radar-desktop_*_linux_amd64.AppImage
+./radar-desktop_*_linux_amd64.AppImage
+```
+The AppImage doesn't update itself. When a new version is out, Radar links to the download.
+
+If the Linux desktop app flashes black, shows black icons or crashes on NVIDIA, see [Linux desktop rendering](docs/configuration.md#linux-desktop-rendering).
+
+Kubeconfig login plugins (`exec`) run from inside the AppImage, not from the folder you started it in. If a plugin's `args` name a file by a relative path, such as `--token-file token.json`, the plugin can't find it and Radar shows "Authentication Failed". Give the full path instead, such as `--token-file /home/you/.kube/token.json`. A relative `command`, such as `./token.sh`, works: it's looked up next to the kubeconfig file.
 
 **Scoop (Windows):**
 ```powershell
@@ -440,7 +451,7 @@ No auth by default (local use). See the **[Authentication Guide](docs/authentica
 
 Radar auto-discovers any CRD in your cluster. Popular tools get [dedicated integrations](docs/integrations.md) with resource views, topology, AI context and application evidence. Coverage varies by integration.
 
-The Helm chart grants read access to common built-in Kubernetes kinds; Secrets and RBAC objects depend on chart settings and the authentication mode. CRD-based integrations need the CRD installed in your cluster *and* read access; most API groups are granted by default, and the chart's [RBAC](deploy/helm/radar/README.md#rbac) and [CRD access](deploy/helm/radar/README.md#crd-access) sections list what is on, what is opt-in, and how to add rules.
+The Helm chart grants read access to common built-in Kubernetes kinds; Secrets, RBAC objects and CertificateSigningRequests depend on chart settings and the authentication mode. CRD-based integrations need the CRD installed in your cluster *and* read access; most API groups are granted by default, and the chart's [RBAC](deploy/helm/radar/README.md#rbac) and [CRD access](deploy/helm/radar/README.md#crd-access) sections list what is on, what is opt-in, and how to add rules.
 
 | Category / integration | Coverage |
 |----------|-----------|
@@ -450,7 +461,7 @@ The Helm chart grants read access to common built-in Kubernetes kinds; Secrets a
 | **Storage** | PersistentVolumeClaims, PersistentVolumes, StorageClasses |
 | **Autoscaling** | HorizontalPodAutoscalers, VerticalPodAutoscalers |
 | **Cluster** | Nodes, Namespaces, ServiceAccounts, Events |
-| **Other Kubernetes APIs** | Workloads, PodGroups, CompositePodGroups, PodCertificateRequests, ClusterTrustBundles (only when served by the cluster) |
+| **Other Kubernetes APIs** | CertificateSigningRequests; Workloads, PodGroups, CompositePodGroups, PodCertificateRequests, ClusterTrustBundles (only when served by the cluster) |
 | **GitOps (FluxCD)** | GitRepository, OCIRepository, HelmRepository, Kustomization, HelmRelease, Alert |
 | **GitOps (ArgoCD)** | Application, ApplicationSet, AppProject |
 | **Argo Rollouts** | Rollout |
@@ -477,6 +488,7 @@ The Helm chart grants read access to common built-in Kubernetes kinds; Secrets a
 | **[NATS](docs/integrations.md#local-runtime-evidence-rabbitmq-nats-and-vault)** | JetStream consumer backlog, acknowledgment-pending and redelivery counters - **local collection** |
 | **Velero** | Backup, Restore, Schedule, BackupStorageLocation, VolumeSnapshotLocation |
 | **External Secrets** | ExternalSecret, ClusterExternalSecret, SecretStore, ClusterSecretStore |
+| **Secrets Store CSI Driver** | [SecretProviderClass and Pod mounts](docs/integrations.md#secrets-store-csi-driver): mount state, object versions and synced Secrets in the Pod drawer |
 | **[Vault](docs/integrations.md#local-runtime-evidence-rabbitmq-nats-and-vault)** | Initialization, seal and standby state - **local collection** |
 | **CloudNativePG** | Cluster, Backup, ScheduledBackup, Pooler, Database, Publication, Subscription, ImageCatalog, ClusterImageCatalog, ObjectStore — plus [dedicated views](docs/cnpg.md) for fleet, protection and declaration triage |
 | **Crossplane** | Managed Resources (any provider), Composite Resources, Claims, Provider, ProviderConfig, Function, Configuration, Composition, CompositionRevision, XRD |

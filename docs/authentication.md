@@ -117,6 +117,12 @@ Two things still hold on a shared listener without authentication:
    - connecting the cluster to Radar Cloud, which outlasts the request, needs an
      explicit acknowledgement.
 
+The browser request guard also covers `/metrics` and `/debug/pprof/*`. It refuses
+`Sec-Fetch-Site: cross-site` and `same-site`. Headerless requests still pass that
+guard, including browser requests over plain HTTP to non-localhost addresses;
+the listener's authentication and profiling policy still apply. See
+[Profiling](configuration.md#profiling) for diagnostic access.
+
 ## Auth Modes
 
 | Mode | Flag | When to Use |
@@ -167,7 +173,14 @@ Groups can arrive as one comma-separated header or as one header per group, as p
 
 The user menu always shows a **Logout** button. Clicking it clears Radar's session cookie. On its own, that isn't enough to switch users: your proxy re-injects the identity header on the next request and signs the same user back in.
 
-To make logout actually switch users, point Radar at your proxy's sign-out URL with `--auth-proxy-logout-url` (or `auth.proxy.logoutURL` in Helm) — e.g. oauth2-proxy's `/oauth2/sign_out`. Radar then redirects the browser there after clearing its own cookie, so the upstream session is torn down too. When unset, the menu shows a note that the proxy may re-authenticate automatically.
+To make logout actually switch users, use one or both of these:
+
+- **The proxy's sign-out URL:** `--auth-proxy-logout-url` (or `auth.proxy.logoutURL` in Helm), e.g. oauth2-proxy's `/oauth2/sign_out`. Radar redirects the browser there after clearing its own cookie, so the proxy ends its session.
+- **The proxy's session cookies:** `--auth-proxy-logout-cookies` (or `auth.proxy.logoutCookies` in Helm), a list of cookie names where `*` matches any characters, e.g. `_oauth2_proxy*`. Logout deletes every matching cookie the browser sends, whether it was set for Radar's host or a parent domain, at `/` or on a path down to Radar's base path. The next request then goes back through the proxy's sign-in. Use it when the proxy has no sign-out URL, or when its sign-out URL leaves cookies behind on Radar's host. Each matching cookie adds one `Set-Cookie` header per parent domain and path, so list only the proxy's session cookies: behind nginx, a long hostname, a deep base path and many matches can exceed its default 4 KB response header buffer. Radar can only delete cookies the browser sends to Radar's address, and deleting them doesn't revoke them on the proxy: a copy taken from the browser keeps working until it expires.
+
+If the proxy signs people in through a single sign-on provider that remembers them, the next sign-in can still happen without a password. Only that provider's own sign-out changes that.
+
+When neither is set, the menu shows a note that the proxy may sign the user back in automatically.
 
 > **Note:** HTTP Basic Auth has no reliable logout mechanism — browsers cache credentials and resend them. If you need user-switching, prefer a proxy with a real sign-out endpoint (oauth2-proxy, Authelia) over plain Basic Auth.
 
@@ -328,7 +341,7 @@ Under cloud-mode (`RADAR_CLOUD_MODE=true`, set automatically by the chart when `
 - Treats `cloud.aiRbac` and `cloud.systemRbac` as controls for the chart's default grants, independent of `cloud.defaultRbac`. False or absent (including after a plain `--reuse-values` upgrade from an older chart) creates no default grant and leaves customer-created bindings untouched. These settings do not disable background jobs or automatic analysis; they control their default Kubernetes access.
 - Requires cluster-admin-equivalent authority or `escalate` on ClusterRoles to create or update the AI/system aggregated roles, in addition to normal chart installation permissions. Restricted installers can set `cloud.aiRbac=false` and `cloud.systemRbac=false` and supply their own read-only group bindings.
 - Uses the Cloud role (`radar:owner` / `radar:member` / `radar:viewer`) only to gate Radar's own configuration (settings, integrations, audit settings, registered OCI chart sources, self-upgrade), which runs as Radar's ServiceAccount. A Cloud request with no role group (such as the Hub's `radar:system` background identity) is refused there. Operations that run as the impersonated user — Helm reads and writes, in-cluster probe pods — are decided by Kubernetes RBAC alone.
-- Does **not** grant `PodCertificateRequest` access through the default Cloud tier bindings. Radar surfaces the API when Kubernetes 1.37 serves it, but a Cloud user can browse requests only when their Kubernetes RBAC independently grants `get/list` access. To opt in, bind a Role or ClusterRole granting `get/list/watch` on `certificates.k8s.io/podcertificaterequests` to the intended `radar:*` groups. This stays separate because certificate-request metadata is more sensitive than ordinary workload inventory.
+- Does **not** grant `PodCertificateRequest` or `CertificateSigningRequest` access through the default Cloud tier bindings. Radar surfaces both APIs (PodCertificateRequests when Kubernetes 1.37 serves them), but a Cloud user can browse requests only when their Kubernetes RBAC independently grants `get/list` access. To opt in, bind a Role or ClusterRole granting `get/list/watch` on `certificates.k8s.io/podcertificaterequests` or a ClusterRole granting it on `certificates.k8s.io/certificatesigningrequests` to the intended `radar:*` groups. This stays separate because certificate-request metadata, including the requester's username, groups and authenticator extra data, is more sensitive than ordinary workload inventory.
 - Restricts the ordinary pod/ClusterIP TCP listener to `/api/health`; the full handler is served only over yamux streams from the outbound Cloud tunnel. Cloud mode also omits `/debug/pprof/*` and narrows auth exemptions to health only.
 
 <a id="cloud-mode-helm-bindings"></a>
@@ -582,6 +595,7 @@ Radar uses stateless HMAC-SHA256 signed cookies for sessions. The cookie contain
 | User header (proxy) | `--auth-user-header` | `auth.proxy.userHeader` | `X-Forwarded-User` |
 | Groups header (proxy) | `--auth-groups-header` | `auth.proxy.groupsHeader` | `X-Forwarded-Groups` |
 | Proxy logout URL (proxy) | `--auth-proxy-logout-url` | `auth.proxy.logoutURL` | — |
+| Proxy logout cookies (proxy) | `--auth-proxy-logout-cookies` | `auth.proxy.logoutCookies` | — |
 | OIDC issuer | `--auth-oidc-issuer` | `auth.oidc.issuerURL` | — |
 | OIDC internal issuer | `--auth-oidc-internal-issuer` | `auth.oidc.internalIssuerURL` | — |
 | OIDC authorization URL | `--auth-oidc-authorization-url` | `auth.oidc.authorizationURL` | — |

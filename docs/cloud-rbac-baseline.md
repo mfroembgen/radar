@@ -42,6 +42,7 @@ grant access to the underlying Role or ClusterRole objects.
 |---|---|
 | OpenTelemetry Collector and Instrumentation | Collector configuration and instrumentation environment values can contain inline credentials. Native visibility adds no default caller grants. |
 | Flagger Canary and MetricTemplate | Canary webhook metadata and MetricTemplate provider headers may contain inline credentials. Collection is separately opt-in; native visibility adds no default caller grants. |
+| Secrets Store CSI SecretProviderClass | `spec.parameters` is free-form provider configuration that the driver does not constrain. SecretProviderClassPodStatus (mount state and object versions only) remains readable, so the Pod drawer still shows whether a volume mounted. |
 | External Secrets SecretStore and ClusterSecretStore | Provider authentication can contain plaintext credentials, such as Scaleway `secretKey.value`. ExternalSecret/ClusterExternalSecret remain readable; store inspection requires a separate customer grant. |
 | KEDA TriggerAuthentication and ClusterTriggerAuthentication | `spec.hashiCorpVault.credential.token` may hold a Vault token directly. ScaledObject/ScaledJob remain readable. |
 | Kyverno UpdateRequest | Admission context may embed the actual triggering object, including a Secret. Queued-policy-work remains denied without another grant. |
@@ -54,6 +55,7 @@ grant access to the underlying Role or ClusterRole objects.
 | Crossplane Kubernetes/Helm ProviderConfig and Helm Release | Pending provider-specific credential/connection-details review; these are deliberate coverage limits, not claims that every instance is sensitive. |
 | Trivy ExposedSecretReport | Secret-detection excerpts; examples are masked, but no blanket masking guarantee is assumed. Other curated report kinds remain readable. |
 | Legacy `traefik.containo.us/serverstransporttcps` | Exact legacy-group schema remains unverified. The reviewed `traefik.io/serverstransporttcps` tuple remains readable. |
+| Kubernetes CertificateSigningRequest | Requests record the requester's username, UID, groups and authenticator extra data. Radar's service account reads them for the resource browser; a Cloud user needs their own `get/list` grant on `certificates.k8s.io/certificatesigningrequests`. |
 
 These exclusions are not a secret-free guarantee for the remaining grants.
 Argo CD Applications can retain local-sync manifests containing Secrets;

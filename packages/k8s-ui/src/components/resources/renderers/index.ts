@@ -3,6 +3,8 @@ export * from './ArgoApplicationRenderer'
 export * from './argo-cells'
 export * from './CertificateRenderer'
 export * from './CertificateRequestRenderer'
+export * from './CertificateSigningRequestRenderer'
+export * from './csr-cells'
 export * from './certmanager-cells'
 export * from './CalicoHostEndpointRenderer'
 export * from './CalicoIPPoolRenderer'
@@ -196,6 +198,7 @@ export { RayJobRenderer } from './RayJobRenderer'
 
 export { OpenTelemetryCollectorRenderer, OpenTelemetryInstrumentationRenderer } from './OpenTelemetryRenderers'
 export { FlaggerCanaryRenderer, FlaggerMetricTemplateRenderer } from './FlaggerRenderers'
+export { SecretProviderClassRenderer, SecretsStoreMountsSection } from './SecretsStoreRenderers'
 
 export { StrimziConnectorRenderer } from './StrimziConnectorRenderer'
 

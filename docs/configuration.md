@@ -38,7 +38,7 @@ installed version. Several flags also take a persistent default from `~/.radar/c
 | `--max-scope-candidates` | `20` | Cap on the namespace-fallback probe fanout (used by accounts that can list namespaces cluster-wide but not list a specific kind cluster-wide). Raise above `20` for clusters with more than 20 namespaces. Env: `RADAR_MAX_SCOPE_CANDIDATES`. |
 | `--prometheus-url` | (auto-discover) | Manual PromQL-compatible query URL, including Prometheus, VictoriaMetrics, Thanos, or Mimir (skips auto-discovery). In local CLI/Desktop mode, applies only to the launch's initial context and never inherits saved headers. |
 | `--prometheus-single-cluster` | `false` | Declare the backend dedicated to this cluster for workload metrics and PVC usage, replacing automatic identity matching. Other metrics do not use this override. [Scope and lifetime](workload-metrics.md#optional-operator-override). |
-| `--prometheus-cluster-label` | (automatic matching) | Optional workload/PVC metrics override for a shared backend, e.g. `cluster=production` (repeatable, ANDed). Alternative to `--prometheus-single-cluster`; leave both unset for automatic matching. Not persisted. |
+| `--prometheus-cluster-label` | (automatic matching) | Optional workload/PVC metrics override for a shared backend, also used for the Caretta/Beyla/Istio traffic map on a metrics store you configured, e.g. `cluster=production` (repeatable, ANDed). Alternative to `--prometheus-single-cluster`; leave both unset for automatic matching. Not persisted. |
 | `--prometheus-header` | | HTTP header sent with every Prometheus request, format `Key=Value` (repeatable). Required for auth-protected backends. In local CLI/Desktop mode, requires `--prometheus-url` in the same launch and applies only to the launch's initial context. |
 | `--prometheus-header-from-env` | | HTTP header sent with every Prometheus request, sourced from an environment variable, format `Key=ENV_VAR` (repeatable). In local CLI/Desktop mode, requires `--prometheus-url` in the same launch and applies only to the launch's initial context. |
 | `--beyla-job-selector` | (empty) | Beyla Live Traffic matcher fragment (empty matches Beyla/Alloy jobs there). Workload charts use it only with an explicit scope override and accept one `job` equality or regex matcher. Automatic workload matching discovers custom jobs without it. [Details](workload-metrics.md#request-sources). |
@@ -119,6 +119,38 @@ only its own setting. Contradictory flags, or contradictory settings within the
 config file, are errors. See [MCP configuration](mcp.md#enabling--disabling) for
 examples, boolean parsing and alternate entrypoints.
 
+## Pod file uploads
+
+The pod file browser can upload a file into the directory it shows. Uploads
+run over `pods/exec`, so they follow the exec permission rather than a switch of
+their own: anyone who can exec into a pod could already write files through the
+terminal. `--disable-exec` turns uploads off along with the terminal.
+
+- **Who can write.** The exec runs as the requesting user, so in auth-enabled
+  mode the user's own RBAC decides. Inside the container the file is written as
+  the container's OS user.
+- **How it writes.** The body streams to a temp file in the same directory, and
+  is renamed into place only after every byte arrived. A cancelled, cut-off or
+  failed upload leaves the destination untouched and removes the temp file. A
+  replaced file keeps its owner and permissions, without setuid, setgid or
+  sticky; when the container's user cannot keep the owner, the upload is
+  refused instead.
+- **What it needs.** The container needs `/bin/sh` and `/proc` plus `mktemp`,
+  `cat`, `wc`, `ln`, `mv`, `chmod`, `ls` and `rm`. Replacing a file owned by
+  another user also needs `chown`. Distroless and scratch images are refused
+  with an explanation, and a missing command is named. For an image that can't
+  take uploads, `kubectl cp` still works if the image has `tar`.
+- **What it refuses.** Symlinks, directories and special files as destinations;
+  a directory reached through a symlink (the error names its real location);
+  replacing an existing file without the user confirming it; files mounted on
+  their own (a `subPath` ConfigMap or Secret); and files over 100 MiB (413). At
+  most four uploads run at once per Radar process, and an upload whose data
+  stops arriving for two minutes is ended (408). A proxy in front of Radar may
+  have a smaller request size limit of its own; raise it to allow uploads.
+
+Changes apply to the running container only and are lost when it is recreated,
+unless they land on a volume that outlives it.
+
 ## HTTP Listener
 
 Radar listens on `127.0.0.1:9280` by default, so an unauthenticated local
@@ -131,7 +163,7 @@ The reserved `*.localhost` family is accepted; arbitrary local DNS and
 To put a non-loopback hostname or reverse proxy in front of Radar, enable Radar
 authentication; do not switch to `0.0.0.0` merely to bypass this check.
 
-To reach Radar through a VM, WSL, dev container, jump host, or another machine,
+To reach Radar through a VM, dev container, jump host, or another machine,
 opt into a shared listener explicitly:
 
 ```bash
@@ -216,6 +248,12 @@ allocation sites and sizes; they are not raw dumps of cached resource contents.
 The diagnostics overlay and generated bug reports use `/api/diagnostics`,
 which remains available independently of profiling.
 
+`/metrics` and `/debug/pprof/*` refuse browser requests whose `Sec-Fetch-Site`
+header is `cross-site` or `same-site`, including a page on another localhost
+port. Open the diagnostic URL directly or use a command-line client. Requests
+without that header remain allowed by this guard; browsers generally omit it
+over plain HTTP to non-localhost addresses. This guard is not authentication.
+
 ## Desktop Window Behavior
 
 On macOS, closing the Radar window hides the app rather than quitting it. The
@@ -236,6 +274,24 @@ release its cluster access, quit explicitly.
 On Linux and Windows, closing the window always quits. Neither gives Radar
 anything to reopen from — no Dock, and Wails v2 ships no tray icon — so hiding
 there would leave a running process with no way to reach it.
+
+## Linux desktop rendering
+
+On some NVIDIA systems, the desktop app may flash black when switching views or show black icons. To fix it, quit the app and launch it with this setting:
+
+```bash
+WEBKIT_DMABUF_RENDERER_FORCE_SHM=0 radar-desktop
+```
+
+For an AppImage:
+
+```bash
+WEBKIT_DMABUF_RENDERER_FORCE_SHM=0 ./radar-desktop_*_linux_amd64.AppImage
+```
+
+This setting applies only to that launch. If the window opens black or the app closes, launch normally to return to the default.
+
+For the separate [upstream NVIDIA crash](https://bugs.webkit.org/show_bug.cgi?id=327542), run `kubectl radar` and open the printed URL in your browser.
 
 ## AI Investigations Agent CLI
 
@@ -352,6 +408,7 @@ All fields are optional — omitted fields use built-in defaults.
 | `restoreLastDesktopContext` | Desktop app only: reopen on the cluster last used (default: enabled). `false` always opens on the kubeconfig's `current-context` — see [Startup Context](#startup-context) |
 | `namespace` | Initial namespace filter |
 | `namespaces` | Initial namespace filters as a list (same as `--namespaces ns1,ns2,ns3`) |
+| `maxScopeCandidates` | Desktop app only: the Desktop equivalent of `--max-scope-candidates` (default 20). How many namespaces Radar checks its access in, the kubeconfig context namespace included; raise it when `namespaces` lists more. Takes effect on the next start. The CLI reads `--max-scope-candidates` and `RADAR_MAX_SCOPE_CANDIDATES` only |
 | `port` | Server port (default 9280) |
 | `noBrowser` | Don't auto-open browser |
 | `noVersionCheck` | Disable automatic version checks; Desktop's manual Check for Updates remains available |
@@ -804,6 +861,10 @@ Leave both unset for automatic matching. Configured labels must exist on each
 affected metric source, including kubelet volume stats. See
 [scope and remedies](workload-metrics.md#pvc-usage-scope).
 
+The same `--prometheus-cluster-label` labels also scope the Caretta, Beyla and
+Istio traffic map when it reads a metrics store you configured. See
+[Traffic map in a shared metrics store](#traffic-map-in-a-shared-metrics-store).
+
 | Run mode | How to configure an explicit override |
 |---|---|
 | Local CLI / `kubectl radar` | Supply the flag on each launch that needs it. These overrides have no `config.json` key or environment-variable equivalent. |
@@ -815,6 +876,25 @@ Changing the Kubernetes connection, logical metrics backend or headers clears
 an active override and resumes automatic matching. A new local port-forward to
 the same discovered Service is not a different backend. Only reapply an override
 after verifying the new connection's scope. See [operator override details](workload-metrics.md#optional-operator-override).
+
+### Traffic map in a shared metrics store
+
+When the traffic map reads Caretta, Beyla or Istio traffic from a metrics store
+you configured (`--prometheus-url`, Helm `traffic.prometheusUrl`, or a URL saved
+in Settings), it tries to keep to this cluster's traffic. It uses the
+`--prometheus-cluster-label` labels when they're set, otherwise the cluster
+label kube-state-metrics carries for this cluster's Pods. Stores Radar finds on
+its own, including Caretta's own store, are read as they are.
+
+When the traffic doesn't match this cluster's labels, may include other
+clusters' traffic, or Radar couldn't check, the map says so and links here. A map
+without a note isn't proof, though: traffic under one cluster name Radar can't
+confirm, or with no cluster label at all, is shown as is. In a shared store,
+label each cluster's traffic where it's scraped or sent to the store (for example
+with a relabel rule or an external label), and set this cluster's label and value
+the same way as for workload metrics
+([by run mode](#workload-metrics-overrides-by-run-mode)). The traffic metrics
+must carry every label you set; traffic without them isn't shown.
 
 ## Startup Context
 
@@ -887,13 +967,13 @@ external terminal. Radar will not substitute a shell for the previous context.
 
 The header has a namespace picker on the right. Pick a single namespace to focus the view, or **All namespaces** to see everything you have access to. Cluster-scoped resources (Nodes, Namespaces, PVs, StorageClasses) appear regardless of the pick if your RBAC permits them — they have no namespace to filter on. Namespace-restricted users without their own cluster-scoped RBAC won't see cluster-scoped sections at all.
 
-The pick is a per-user view filter — it doesn't change anything for other users sharing the same Radar instance. Locally, your pick is remembered per kubeconfig context across restarts. In shared (auth-enabled) deployments the pick lives for the session.
+The pick belongs to the browser tab. Picking in one tab doesn't change your other tabs, or what anyone else sees, and a tab keeps its pick when you reload it, including **All namespaces**. A new tab starts from the last pick made on this Radar for the kubeconfig context, in any tab. Locally that last pick is remembered across restarts. In shared (auth-enabled) deployments it lives until Radar restarts or reconnects to the cluster, and it is shared by everyone Radar maps to the same Kubernetes user, so with a shared identity a new tab can start on someone else's last pick.
 
 The pick narrows Radar's own views only, and only because the UI sends it with each request. An API read that names no namespace (`?namespace=` / `?namespaces=`) never inherits a remembered pick: it returns everything you're allowed to see, within the `--namespace-scope` pin when one is set. So the same user reading through another client — AI tools over MCP, Radar Cloud's fleet-wide views and background pollers, or `curl` — is never quietly narrowed to a namespace picked while browsing. A few UI surfaces deliberately cover all your namespaces regardless of the pick: the namespace list in the ⌘K palette, the **My permissions** dialog, and the standalone Cost view (which disables the picker). Home's Cost Insights card follows the pick.
 
-Until you make a pick, local sessions default to the namespace set on the kubeconfig context (kubectl parity — the same namespace `kubectl` would use, including one set via `kubectl config set-context` or `kubens`). An explicit `--namespace` / `--namespaces` flag outranks the kubeconfig value, and contexts without either default to **All namespaces**. Once you pick namespaces or explicitly choose **All namespaces**, that choice sticks for the context and the kubeconfig value is no longer consulted.
+Until you make a pick, local sessions default to the namespace set on the kubeconfig context (kubectl parity — the same namespace `kubectl` would use, including one set via `kubectl config set-context` or `kubens`). An explicit `--namespace` / `--namespaces` flag outranks the kubeconfig value, and contexts without either default to **All namespaces**. Once you pick namespaces or explicitly choose **All namespaces**, that choice is what new tabs start from for the context and the kubeconfig value is no longer consulted.
 
-When Radar starts with `--namespace-scope`, the picker controls the process-wide cache scope instead of just a view filter. Namespaced informer caches are pinned to one namespace while cluster-scoped resources remain cluster-wide. Local/no-auth sessions can switch the scoped namespace, which rebuilds the cache in place. Auth-enabled and Radar Cloud sessions lock the picker to the startup namespace so one user cannot reshape the shared backend cache for everyone.
+When Radar starts with `--namespace-scope`, the picker controls the process-wide cache scope instead of just a view filter, so it is one setting for every tab and every user. Namespaced informer caches are pinned to one namespace while cluster-scoped resources remain cluster-wide. Local/no-auth sessions can switch the scoped namespace, which rebuilds the cache in place. Auth-enabled and Radar Cloud sessions lock the picker to the startup namespace so one user cannot reshape the shared backend cache for everyone.
 
 **Single namespace only.** `--namespace-scope` pins the cache to exactly one namespace; scoping to several namespaces at once is not supported yet. Passing more than one (e.g. `--namespace=a,b`) fails at startup with a clear error rather than silently caching nothing. When scoped, the namespace picker becomes single-select, and a switch re-points the whole cache to the new namespace rather than adding to it.
 
@@ -911,9 +991,9 @@ Radar Desktop doesn't take command-line flags, so set the same list in `~/.radar
 { "namespaces": ["ns1", "ns2", "ns3"] }
 ```
 
-Radar probes each listed namespace for access and watches every namespace where access is granted — resource views then cover all of them, not just the first. The list is also each user's initial picker selection: locally via the launch URL, and in shared (auth-enabled) deployments as a per-session default the UI picks up when it loads. Like any pick, it narrows only the UI's views, not API reads that name no namespace. Clearing the picker back to **All namespaces** sticks for the rest of the session. The picker can switch between those namespaces or keep several selected at once.
+Radar probes each listed namespace for access and watches every namespace where access is granted — resource views then cover all of them, not just the first. The list is also each user's initial picker selection: locally via the launch URL, and in shared (auth-enabled) deployments as the default a user's first tab starts from. Like any pick, it narrows only the UI's views, not API reads that name no namespace. Clearing the picker back to **All namespaces** is then what new tabs start from. The picker can switch between those namespaces or keep several selected at once.
 
-This covers built-in resource types and custom resources alike: CRDs (GitOps, Gateway API, etc.) are probed per-kind across the same list and watched in every granted namespace. A custom resource kind refused everywhere Radar checked stays refused for a minute before Radar checks again, so access granted to it while Radar runs can take that long to appear. The list is capped by `--max-scope-candidates` (default 20) — startup fails with a clear error rather than silently probing a subset.
+This covers built-in resource types and custom resources alike: CRDs (GitOps, Gateway API, etc.) are probed per-kind across the same list and watched in every granted namespace. A custom resource kind refused everywhere Radar checked stays refused for a minute before Radar checks again, so access granted to it while Radar runs can take that long to appear. The list is capped by `--max-scope-candidates` (default 20), counting the kubeconfig context namespace when it isn't in the list. Rather than silently probing a subset, the CLI exits with an error, and Radar Desktop opens with the error in its window and doesn't connect; raise the cap with `maxScopeCandidates` in `~/.radar/config.json` and reopen Desktop.
 
 ## Audit evidence under partial access
 

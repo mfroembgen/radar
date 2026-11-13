@@ -65,10 +65,14 @@ type DashboardCRDsResponse struct {
 }
 
 type DashboardCluster struct {
-	Name      string `json:"name"`
-	Platform  string `json:"platform"`
-	Version   string `json:"version"`
-	Connected bool   `json:"connected"`
+	// Name is the kubeconfig context, or "in-cluster" in in-cluster mode.
+	Name string `json:"name"`
+	// KubeconfigCluster is the kubeconfig cluster entry the context points at.
+	// Several contexts can share one. Omitted in in-cluster mode.
+	KubeconfigCluster string `json:"kubeconfigCluster,omitempty"`
+	Platform          string `json:"platform"`
+	Version           string `json:"version"`
+	Connected         bool   `json:"connected"`
 	// UpgradeReviewedThrough is the newest Kubernetes minor the upgrade-impact
 	// catalog covers. A static catalog fact, so Home can hint that the cluster
 	// is behind without triggering the (expensive) upgrade-readiness scan.
@@ -283,6 +287,8 @@ type DashboardHelmRelease struct {
 	ChartVersion   string `json:"chartVersion"`
 	Status         string `json:"status"`
 	ResourceHealth string `json:"resourceHealth,omitempty"`
+	// See helm.HelmRelease.StatusUnreadCount.
+	StatusUnreadCount int `json:"statusUnreadCount,omitempty"`
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -521,8 +527,13 @@ func (s *Server) getDashboardCluster(ctx context.Context) DashboardCluster {
 	if err != nil {
 		return DashboardCluster{Connected: false}
 	}
+	return dashboardClusterFromInfo(info)
+}
+
+func dashboardClusterFromInfo(info *k8s.ClusterInfo) DashboardCluster {
 	return DashboardCluster{
-		Name:                   info.Cluster,
+		Name:                   info.DisplayName(),
+		KubeconfigCluster:      info.KubeconfigCluster(),
 		Platform:               info.Platform,
 		Version:                info.KubernetesVersion,
 		Connected:              true,
@@ -1246,7 +1257,7 @@ func (s *Server) getDashboardHelmSummary(r *http.Request, namespaces []string, c
 		}
 	}
 
-	releases, read, denied, err := helmClient.ListReleasesRecordingAccess(r.Context(), namespaces, auth.UserFromContext(r.Context()))
+	releases, read, denied, err := helmClient.ListReleasesRecordingAccess(r.Context(), namespaces, auth.UserFromContext(r.Context()), s.helmObjectScope(r))
 	if (err == nil && len(read) == 0 && len(denied) > 0) || helm.ReleaseReadDeniedForCaller(err) {
 		// With a permission check unanswered, the read may have fallen back
 		// to a cluster-wide list the caller can't make even though some
@@ -1295,12 +1306,13 @@ func dashboardHelmSummaryFromReleases(releases []helm.HelmRelease) DashboardHelm
 	result.Releases = make([]DashboardHelmRelease, 0, limit)
 	for _, rel := range releases[:limit] {
 		result.Releases = append(result.Releases, DashboardHelmRelease{
-			Name:           rel.Name,
-			Namespace:      rel.Namespace,
-			Chart:          rel.Chart,
-			ChartVersion:   rel.ChartVersion,
-			Status:         rel.Status,
-			ResourceHealth: rel.ResourceHealth,
+			Name:              rel.Name,
+			Namespace:         rel.Namespace,
+			Chart:             rel.Chart,
+			ChartVersion:      rel.ChartVersion,
+			Status:            rel.Status,
+			ResourceHealth:    rel.ResourceHealth,
+			StatusUnreadCount: rel.StatusUnreadCount,
 		})
 	}
 
