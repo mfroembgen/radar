@@ -4,6 +4,65 @@ entries:
   - annotations:
       artifacthub.io/images: |
         - name: radar
+          image: ghcr.io/mfroembgen/radar:1.20.3
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/links: |
+        - name: Website
+          url: https://radarhq.io
+        - name: Documentation
+          url: https://radarhq.io/docs
+        - name: Source
+          url: https://github.com/skyhook-io/radar
+        - name: Releases
+          url: https://github.com/skyhook-io/radar/releases
+        - name: Discord
+          url: https://radarhq.io/community/chat
+      artifacthub.io/maintainers: |
+        - name: Skyhook
+          email: support@skyhook.io
+      artifacthub.io/screenshots: |
+        - title: Multi-cluster topology
+          url: https://github.com/skyhook-io/radar/raw/main/docs/screenshots/topology-view.png
+        - title: Resource browser
+          url: https://github.com/skyhook-io/radar/raw/main/docs/screenshots/resources-view.png
+        - title: Event timeline
+          url: https://github.com/skyhook-io/radar/raw/main/docs/screenshots/timeline-view.png
+        - title: Service traffic map
+          url: https://github.com/skyhook-io/radar/raw/main/docs/screenshots/traffic-view.png
+      category: monitoring-logging
+    apiVersion: v2
+    appVersion: 1.20.3
+    created: "2026-11-13T19:44:39.978181+01:00"
+    description: Modern Kubernetes visibility - topology, traffic, Helm and GitOps
+      management
+    digest: ec078f47a412e0aaf257087ffe5cc72321940a70efe395cae66d43b5c04f9f1b
+    home: https://radarhq.io
+    icon: https://radarhq.io/radar/icon-512.png
+    keywords:
+    - kubernetes
+    - kubernetes-dashboard
+    - kubernetes-ui
+    - kubernetes-monitoring
+    - visualization
+    - topology
+    - helm
+    - gitops
+    - mcp
+    maintainers:
+    - email: support@skyhook.io
+      name: Skyhook
+      url: https://radarhq.io
+    name: radar
+    sources:
+    - https://github.com/mfroembgen/radar/tree/9e3509126c492a310bc4dcdff1eea90e7a508a10
+    - https://github.com/skyhook-io/radar
+    type: application
+    urls:
+    - radar-1.20.3.tgz
+    version: 1.20.3
+  - annotations:
+      artifacthub.io/images: |
+        - name: radar
           image: ghcr.io/mfroembgen/radar:1.20.2
       artifacthub.io/license: Apache-2.0
       artifacthub.io/links: |
@@ -32,7 +91,7 @@ entries:
       category: monitoring-logging
     apiVersion: v2
     appVersion: 1.20.2
-    created: "2026-11-11T12:08:14.032739+01:00"
+    created: "2026-11-13T19:44:39.975578+01:00"
     description: Modern Kubernetes visibility - topology, traffic, Helm and GitOps
       management
     digest: 8e387fa7b3baa83de1415c1c64dba965c620b2425b716827f03a5ebb97df93d3
@@ -60,4 +119,4 @@ entries:
     urls:
     - radar-1.20.2.tgz
     version: 1.20.2
-generated: "2026-11-11T12:08:14.030866+01:00"
+generated: "2026-11-13T19:44:39.973243+01:00"
