@@ -662,6 +662,15 @@ mcp:
   httpTools: false
   # Set to false to disable the MCP server (useful when deployed behind authentication)
   enabled: true
+  # Authenticate remote MCP clients with WorkOS AuthKit (requires auth.mode
+  # oidc or proxy). Register each MCP endpoint URL under publicURL, such as
+  # https://radar.example.com/mcp, as a WorkOS resource indicator. Users get
+  # the Kubernetes identity auth.oidc.usernamePrefix + email and the group
+  # auth.oidc.groupsPrefix + email domain.
+  workos:
+    authkitDomain: ""      # e.g. https://example.authkit.app
+    publicURL: ""          # public origin plus basePath, e.g. https://radar.example.com
+    allowedEmailDomain: "" # e.g. example.com
 
 # OpenCost/Kubecost display configuration
 cost:

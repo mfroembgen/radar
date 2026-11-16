@@ -1,0 +1,32 @@
+suite: MCP WorkOS AuthKit authentication
+templates:
+  - deployment.yaml
+tests:
+  - it: omits WorkOS flags by default
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --mcp-workos-authkit-domain=
+          any: true
+  - it: passes the WorkOS settings
+    set:
+      mcp.workos:
+        authkitDomain: https://example.authkit.app
+        publicURL: https://radar.example.com
+        allowedEmailDomain: example.com
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mcp-workos-authkit-domain=https://example.authkit.app
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mcp-workos-public-url=https://radar.example.com
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --mcp-workos-allowed-email-domain=example.com
+  - it: requires all WorkOS settings together
+    set:
+      mcp.workos.authkitDomain: https://example.authkit.app
+    asserts:
+      - failedTemplate:
+          errorMessage: mcp.workos.publicURL is required
