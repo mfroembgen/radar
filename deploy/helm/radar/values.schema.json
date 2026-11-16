@@ -393,7 +393,16 @@
       "properties": {
         "enabled": { "type": "boolean" },
         "execTools": { "type": "boolean" },
-        "httpTools": { "type": "boolean" }
+        "httpTools": { "type": "boolean" },
+        "workos": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "authkitDomain": { "type": "string" },
+            "publicURL": { "type": "string" },
+            "allowedEmailDomain": { "type": "string" }
+          }
+        }
       }
     },
     "cost": {

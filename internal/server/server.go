@@ -122,6 +122,7 @@ type Server struct {
 	authConfig              auth.Config
 	permCache               *auth.PermissionCache
 	oidcHandler             *auth.OIDCHandler
+	mcpWorkOS               *auth.WorkOSAuth
 	saveFileFunc            func(defaultFilename string, data []byte) (string, error)
 	saveFileStreamFunc      func(defaultFilename string, r io.Reader) (string, error)
 	// newExecutor builds the exec client for pod file transfers. Nil in
@@ -412,6 +413,7 @@ func New(cfg Config) *Server {
 		}
 
 	}
+	s.setupMCPWorkOS(cfg)
 
 	// Set up static file system
 	if !cfg.DevMode && cfg.StaticRoot != "" {
@@ -427,6 +429,7 @@ func New(cfg Config) *Server {
 
 func (s *Server) setupRoutes() {
 	if s.basePath != "" {
+		s.mountMCPWorkOSMetadata(s.router)
 		appRouter := chi.NewRouter()
 		s.setupAppRoutes(appRouter)
 		s.router.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -514,7 +517,10 @@ func (s *Server) setupAppRoutes(r chi.Router) {
 
 	// Auth middleware (when auth is enabled)
 	if s.authConfig.Enabled() {
-		r.Use(auth.Authenticate(s.authConfig))
+		r.Use(s.authenticate)
+	}
+	if s.basePath == "" {
+		s.mountMCPWorkOSMetadata(r)
 	}
 
 	// Auth routes

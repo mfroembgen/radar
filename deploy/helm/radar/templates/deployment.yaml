@@ -218,6 +218,13 @@ spec:
             {{- if not .Values.mcp.enabled }}
             - --no-mcp
             {{- end }}
+            {{- with .Values.mcp.workos }}
+            {{- if or .authkitDomain .publicURL .allowedEmailDomain }}
+            - --mcp-workos-authkit-domain={{ required "mcp.workos.authkitDomain is required" .authkitDomain }}
+            - --mcp-workos-public-url={{ required "mcp.workos.publicURL is required" .publicURL }}
+            - --mcp-workos-allowed-email-domain={{ required "mcp.workos.allowedEmailDomain is required" .allowedEmailDomain }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.debug.image }}
             - --debug-image={{ .Values.debug.image }}
             {{- end }}
