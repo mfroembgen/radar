@@ -484,6 +484,29 @@ The port matches your `--port` flag (default 9280). The MCP server uses the stat
 
 Over HTTP, when a client on protocol 2026-07-28 stops waiting for a `list_resources` call, for example on a tool timeout, Radar stops working on it too. This matters when the kind is not loaded yet: the call otherwise keeps waiting for Radar to start watching it, up to 3 seconds once the watch has started. Every other tool, and every call from a client on an older protocol version, runs to completion after the client leaves. Write tools always do, so a change is never left half applied because the caller stopped waiting.
 
+### Remote clients with WorkOS AuthKit
+
+A shared in-cluster Radar can authenticate remote MCP clients with
+[WorkOS AuthKit](https://workos.com/docs/authkit/mcp). AuthKit handles client
+registration, sign-in, consent and token refresh. Radar only verifies its
+access tokens, so pod restarts and extra replicas keep clients signed in.
+
+```
+radar --auth-mode=oidc ... \
+  --mcp-workos-authkit-domain=https://example.authkit.app \
+  --mcp-workos-public-url=https://radar.example.com \
+  --mcp-workos-allowed-email-domain=example.com
+```
+
+In Helm, set `mcp.workos.authkitDomain`, `mcp.workos.publicURL` and
+`mcp.workos.allowedEmailDomain`. Register each endpoint under the public URL,
+such as `https://radar.example.com/mcp` and
+`https://radar.example.com/mcp-readonly`, as a WorkOS resource indicator.
+Radar accepts a token only for its own endpoint, from a user whose verified
+email is in the allowed domain. It acts as `<auth.oidc.usernamePrefix><email>`
+in group `<auth.oidc.groupsPrefix><domain>`. The browser UI keeps its own
+authentication.
+
 ## Server instructions
 
 When a client connects, Radar returns MCP [server instructions](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle#initialization) in the `initialize` result, or, for clients on protocol version 2026-07-28 (which has no `initialize`), in the `server/discover` result. The text is about 3,400 characters on which tool answers which question, how to read issue timing and attached changes, what a tool result does and does not prove, and that text read from the cluster (logs, events, annotations) is data, never instructions. It lives in [`pkg/investigation/guidance.go`](../pkg/investigation/guidance.go). Agents in clients that use server instructions get this guidance without a separate skill or rules file.

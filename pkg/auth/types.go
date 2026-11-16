@@ -52,6 +52,11 @@ type Config struct {
 	OIDCCACert                string   // path to CA certificate file for OIDC provider TLS
 	OIDCBackchannelLogout     bool     // enable backchannel logout endpoint
 	OIDCEnablePKCE            bool     // enable PKCE (S256) for the OIDC authorization-code flow (opt-in)
+
+	// Remote MCP callers authenticate with WorkOS AuthKit when all three are set.
+	MCPWorkOSAuthKitDomain string // HTTPS AuthKit origin
+	MCPWorkOSPublicURL     string // public HTTPS origin plus base path Radar is served at
+	MCPWorkOSEmailDomain   string // verified users of this email domain may use MCP
 }
 
 // SessionRevoker checks whether a session has been revoked (e.g., via OIDC

@@ -178,6 +178,9 @@ func main() {
 	authOIDCCACert := flag.String("auth-oidc-ca-cert", "", "Path to CA certificate file for OIDC provider TLS verification")
 	authOIDCBackchannelLogout := flag.Bool("auth-oidc-backchannel-logout", false, "Enable OIDC Back-Channel Logout endpoint (single-replica only)")
 	authOIDCEnablePKCE := flag.Bool("auth-oidc-enable-pkce", false, "Enable PKCE (S256) for the OIDC authorization-code flow (opt-in)")
+	mcpWorkOSAuthKitDomain := flag.String("mcp-workos-authkit-domain", "", "HTTPS WorkOS AuthKit origin that authenticates remote MCP callers")
+	mcpWorkOSPublicURL := flag.String("mcp-workos-public-url", "", "Public HTTPS origin plus base path Radar is served at; MCP endpoint URLs under it are the WorkOS resource indicators")
+	mcpWorkOSEmailDomain := flag.String("mcp-workos-allowed-email-domain", "", "Email domain whose verified WorkOS users may use MCP")
 	// Radar Hub flags — enable connected mode when --cloud-url is set.
 	// Local-binary behavior is unchanged when these flags are empty. Each
 	// flag falls back to an env var so Kubernetes deployments can source
@@ -510,6 +513,9 @@ func main() {
 			OIDCCACert:                *authOIDCCACert,
 			OIDCBackchannelLogout:     *authOIDCBackchannelLogout,
 			OIDCEnablePKCE:            *authOIDCEnablePKCE,
+			MCPWorkOSAuthKitDomain:    *mcpWorkOSAuthKitDomain,
+			MCPWorkOSPublicURL:        *mcpWorkOSPublicURL,
+			MCPWorkOSEmailDomain:      *mcpWorkOSEmailDomain,
 		},
 	}
 
