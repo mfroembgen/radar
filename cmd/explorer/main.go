@@ -154,6 +154,7 @@ func main() {
 	mcpFlags := config.RegisterMCPFlags(flag.CommandLine, fileCfg)
 	mcpCatalogStdio := flag.Bool("mcp-catalog-stdio", false, "Start only the MCP catalog over stdio for registry/inspector introspection; skips Kubernetes initialization")
 	mcpCatalogOnly := flag.Bool("mcp-catalog-only", false, "Start only the MCP endpoint for registry/inspector catalog introspection; skips Kubernetes initialization")
+	mcpNoInstructions := flag.Bool("mcp-no-instructions", false, "Send no server instructions on /mcp, /mcp-readonly and stdio, for a client that connects several Radar instances and needs the guidance from only one")
 	// Auth flags
 	authMode := flag.String("auth-mode", "none", "Authentication mode: none, proxy, or oidc")
 	authSecret := flag.String("auth-secret", "", "HMAC secret key for session cookies (auto-generated if empty)")
@@ -528,6 +529,7 @@ func main() {
 
 	// Set global flags
 	app.SetGlobals(cfg)
+	mcppkg.SetInstructionsDisabled(*mcpNoInstructions)
 
 	if *mcpCatalogStdio {
 		mode := "full"
