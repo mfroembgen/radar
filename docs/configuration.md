@@ -46,6 +46,7 @@ installed version. Several flags also take a persistent default from `~/.radar/c
 | `--auth-mode` | `none` | Authentication mode: `none`, `proxy`, or `oidc` ([details](authentication.md)) |
 | `--no-mcp` | `false` | Disable all MCP endpoints |
 | `--mcp-read-only` | `false` | Expose only read-only MCP tools; disable `/mcp` (env: `RADAR_MCP_READ_ONLY`) |
+| `--mcp-no-instructions` | `false` | Send no server instructions on `/mcp`, `/mcp-readonly` and stdio, for a client that connects several Radar instances |
 | `--mcp-catalog-stdio` | `false` | Start only the MCP catalog over stdio for registry introspection |
 | `--version` | | Show version and exit |
 
