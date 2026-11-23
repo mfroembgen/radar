@@ -4,7 +4,7 @@ entries:
   - annotations:
       artifacthub.io/images: |
         - name: radar
-          image: ghcr.io/mfroembgen/radar:1.20.3
+          image: ghcr.io/mfroembgen/radar:1.21.1
       artifacthub.io/license: Apache-2.0
       artifacthub.io/links: |
         - name: Website
@@ -15,8 +15,8 @@ entries:
           url: https://github.com/skyhook-io/radar
         - name: Releases
           url: https://github.com/skyhook-io/radar/releases
-        - name: Discord
-          url: https://radarhq.io/community/chat
+        - name: Slack
+          url: https://radarhq.io/slack
       artifacthub.io/maintainers: |
         - name: Skyhook
           email: support@skyhook.io
@@ -31,11 +31,11 @@ entries:
           url: https://github.com/skyhook-io/radar/raw/main/docs/screenshots/traffic-view.png
       category: monitoring-logging
     apiVersion: v2
-    appVersion: 1.20.3
-    created: "2026-11-16T11:36:27.205664+01:00"
+    appVersion: 1.21.1
+    created: "2026-11-23T09:22:52.790945+01:00"
     description: Modern Kubernetes visibility - topology, traffic, Helm and GitOps
       management
-    digest: 19335016cbd1ec1384c122d434dbd3986267428c7300f44d296023dbb9aa0fb6
+    digest: 9f786ca6124aad6c89e3a7e618c6444fe9243743ecd7e1c364c3469b7087b6ea
     home: https://radarhq.io
     icon: https://radarhq.io/radar/icon-512.png
     keywords:
@@ -54,10 +54,10 @@ entries:
       url: https://radarhq.io
     name: radar
     sources:
-    - https://github.com/mfroembgen/radar/tree/d42152b7554433b978741e5b7fdbafe8a736de03
+    - https://github.com/mfroembgen/radar/tree/6d256ee472e37d2945f65e1903847b5c1666465e
     - https://github.com/skyhook-io/radar
     type: application
     urls:
-    - radar-1.20.3.tgz
-    version: 1.20.3
-generated: "2026-11-16T11:36:27.203344+01:00"
+    - radar-1.21.1.tgz
+    version: 1.21.1
+generated: "2026-11-23T09:22:52.789132+01:00"

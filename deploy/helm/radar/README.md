@@ -566,7 +566,7 @@ Always granted (required for basic functionality):
 
 | API Group | Resources |
 |-----------|-----------|
-| Core (`""`) | pods, services, configmaps, events, namespaces, nodes, persistentvolumes, pvcs, serviceaccounts, endpoints, limitranges, resourcequotas |
+| Core (`""`) | pods, services, configmaps, events, namespaces, nodes, persistentvolumes, pvcs, serviceaccounts, podtemplates, endpoints, limitranges, resourcequotas |
 | `discovery.k8s.io` | endpointslices |
 | `policy` | poddisruptionbudgets |
 | `storage.k8s.io` | storageclasses |
@@ -665,6 +665,8 @@ delegates Radar-to-Service network access; it doesn't control where a Service
 routes. On a shared cluster, constrain who can change EndpointSlices, directly or
 through GitOps controllers, and use network policy.
 
+For a Java4Shell check that reports **Registry authentication required**, see [workload pull secrets and private ECR setup for in-cluster Radar](../../../docs/authentication.md#java4shell-registry-access).
+
 ### Turning exec off
 
 `disableExec: true` turns off pod exec through Radar for everyone on this cluster,
@@ -706,7 +708,7 @@ It creates a namespace-scoped Role (not a ClusterRole) with `get` + `patch` on t
 
 ### CRD Access
 
-Radar discovers CRDs in your cluster. Common CRD groups are enabled by default; Flagger is explicitly opt-in. Granting RBAC for CRDs that don't exist has no effect.
+Radar discovers CRDs in your cluster. Common CRD groups are enabled by default; Flagger and system-upgrade-controller are explicitly opt-in. Granting RBAC for CRDs that don't exist has no effect.
 
 **Wildcard option:** Grant the collector service account read access to every API group and resource:
 ```bash
@@ -720,6 +722,8 @@ retain their finite grants.
 
 | Option | API Groups |
 |--------|------------|
+| `agentSandbox` | `agents.x-k8s.io`, `extensions.agents.x-k8s.io`. Sandboxes and SandboxTemplates carry Pod templates, whose environment values can be inline |
+| `agentSubstrate` | `ate.dev` |
 | `antrea` | `crd.antrea.io` (`networkpolicies`, `clusternetworkpolicies`) |
 | `apiRegistration` | `apiregistration.k8s.io` |
 | `argo` | `argoproj.io` |
@@ -738,13 +742,14 @@ retain their finite grants.
 | `externalSecrets` | `external-secrets.io` |
 | `flagger` | `flagger.app` (`canaries`, `metrictemplates` only); **off by default**. Enable `rbac.crdGroups.flagger=true` for native browsing and failed-rollout Issues. |
 | `flux` | `*.toolkit.fluxcd.io` |
+| `fluxOperator` | `fluxcd.controlplane.io` (FluxInstance, FluxReport, ResourceSet, ResourceSetInputProvider) |
 | `gatewayApi` | `gateway.networking.k8s.io` |
 | `gcpMonitoring` | `monitoring.googleapis.com` |
 | `grafana` | `monitoring.grafana.com`, `tempo.grafana.com`, `loki.grafana.com`, `grafana.integreatly.org` |
 | `istio` | `networking.istio.io`, `security.istio.io` |
 | `karpenter` | `karpenter.sh`, `karpenter.k8s.aws`, `karpenter.azure.com`, `karpenter.k8s.gcp`, `eks.amazonaws.com` |
 | `keda` | `keda.sh` |
-| `knative` | `serving.knative.dev`, `eventing.knative.dev`, `sources.knative.dev`, `messaging.knative.dev`, `flows.knative.dev`, `networking.internal.knative.dev` |
+| `knative` | `serving.knative.dev`, `eventing.knative.dev`, `sources.knative.dev`, `messaging.knative.dev`, `flows.knative.dev`, `networking.internal.knative.dev`, and `jobsinks` in `sinks.knative.dev` |
 | `kubeshark` | `kubeshark.io` |
 | `kured` | `kured.io` |
 | `kyverno` | `kyverno.io`, `policies.kyverno.io`, `wgpolicyk8s.io`, `reports.kyverno.io`, `openreports.io` |
@@ -760,11 +765,13 @@ retain their finite grants.
 | `sealedSecrets` | `bitnami.com` |
 | `secretsStoreCsi` | `secrets-store.csi.x-k8s.io` (`secretproviderclasses`, `secretproviderclasspodstatuses` only) |
 | `strimzi` | `strimzi.io`, `kafka.strimzi.io`, `core.strimzi.io` (`strimzipodsets` only) |
+| `systemUpgrade` | `upgrade.cattle.io` (`plans` only); **off by default**, because Plan env can carry values. Enable `rbac.crdGroups.systemUpgrade=true` on Rancher/k3s/RKE2 for the Plan drawer and per-node upgrade progress. |
 | `tekton` | `tekton.dev` |
 | `traefik` | `traefik.io`, `traefik.containo.us` |
 | `trivy` | `aquasecurity.github.io` |
 | `velero` | `velero.io` |
 | `verticalPodAutoscaler` | `autoscaling.k8s.io` |
+| `volumeSnapshots` | `snapshot.storage.k8s.io` (`volumesnapshots`, `volumesnapshotcontents`, `volumesnapshotclasses` only) |
 
 **VictoriaMetrics collection:** the chart grants Radar cluster-wide `get/list/watch`
 on VMAgent, VMCluster and VMSingle (`vmagents`, `vmclusters`, `vmsingles` in

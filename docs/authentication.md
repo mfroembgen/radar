@@ -40,7 +40,26 @@ Ownership answers (owners, children, and which GitOps manager manages an object)
 REST AI context and MCP additionally require exact-kind `get` access for ownership and manager references, so their
 answers can be narrower than the UI's. A manager the caller can't read contributes no evidence; a name in the object's
 own metadata stays as a `withheld` claim, and the answer says it is `narrowed`. These reference checks do not support
-`resourceNames`-only grants. See the [ownership contract](ownership.md#what-manages-an-object).
+`resourceNames`-only grants. See the [ownership contract](ownership.md#what-manages-an-object). The object's own
+relationships (what it routes to, declares or selects) need only the access that opened it: its kind in its namespace
+counts as readable for them, so a route you read through namespace access lists its readable backends even without a
+`get` grant on its kind. Every reference the answer emits still needs its own `get` check.
+
+Related Resources, the AI resource context and MCP `get_resource` name the ConfigMaps, Secrets, PVCs and ServiceAccount
+a readable object's pod template references, a Pod's Node, an Ingress's TLS Secrets and a ServiceAccount's Secrets, and
+Related Resources also the ResourceClaims a Pod's spec names and a Calico HostEndpoint's Node, even when you
+can't read them, since the object's own YAML already shows those names. Such a reference carries `state: "denied"` (or `"access_unverified"` when Radar couldn't check your access), says
+nothing about whether the object exists or its state, and opens nothing. Workload history never follows it. Objects
+Radar finds by searching, such as a policy or monitor elsewhere that selects the object, are still withheld when you
+can't read them; the answer says only that something related was withheld.
+
+Relationship answers (what uses a ConfigMap, what a selector matches, what routes to a Service) follow the same
+namespace rule. A search that spans namespaces, such as a ServiceMonitor's with `namespaceSelector: any`, matches
+against Radar's cache first and then drops what you may not read, and the answer says it is `narrowed`. It never
+returns the identities or bodies of what it dropped, but because you can write your own selectors, the mark can
+reveal whether hidden cached objects match one: whether something in a namespace you can't see carries those labels.
+A `narrowed` mark is not proof of a match, since a namespace Radar couldn't read also narrows the answer. If that is
+too much for your setup, run a Radar instance per trust boundary, as described above.
 
 Deletion-impact previews fetch the root as the caller and use caller-readable ownership data. Permission and collection gaps make the result partial; remote or unknown GitOps destinations expose no local inventory. See [Shared deletion preview](mcp.md#shared-deletion-preview). Policy coverage metadata is filtered alongside its referenced workloads; it does not reveal names from hidden namespaces.
 
@@ -74,6 +93,48 @@ digest, so a cached image is only served after the caller has read its manifest
 from that same repository.
 Without an authenticated user, local image inspection keeps its existing
 credential discovery and network behavior.
+
+### Java4Shell registry access
+
+A running Pod tells Radar which image the node pulled. To check its Java version,
+Radar makes a separate request to the registry for the manifest and image config.
+A node can pull an image with its own IAM role even when Radar has no access to
+that repository. If the report says **Registry authentication required**, that
+image's Java version is still unknown.
+
+| Where you run the check | How Radar can read private images |
+| --- | --- |
+| In-cluster UI, default Helm install (`auth.mode: none`) | Radar can use a Docker config Secret named in the workload Pod's `spec.imagePullSecrets` if Radar's ServiceAccount can read it into the cache. The default chart grants no Secret reads. Radar's own cloud and Docker credentials are disabled in this mode. |
+| In-cluster UI, signed in | You need to list and get Pods in the workload namespace. Radar can use the Pod's pull Secret if it is in Radar's cache and you can `get` that Secret or `create pods/exec` there. With exec access, Radar can also use its own registry credentials. The check itself never executes a command in a Pod. |
+| CLI or local loopback UI with auth off | Radar can use readable workload pull secrets and registry credentials on the machine running Radar. For private ECR, configure the registry host and a local AWS identity with pull access. [CLI setup and example](configuration.md#java4shell-cli) |
+
+**Private ECR on EKS.** If the workload already names a usable pull secret,
+Radar can use it as described above. For workloads pulled with node IAM and
+no pull secret, choose where to run the check. If you use the default Helm
+install, the quickest option is the [CLI with your AWS profile](configuration.md#java4shell-cli).
+To run the check in a signed-in Radar UI, configure the installation once.
+
+1. Associate a dedicated IAM role with **Radar's ServiceAccount** using EKS Pod Identity or IRSA.
+   Allow `ecr:GetAuthorizationToken` on `*` and `ecr:BatchGetImage` and
+   `ecr:GetDownloadUrlForLayer` on the repositories Radar should read.
+   [Configure AWS access for a Kubernetes ServiceAccount](https://docs.aws.amazon.com/eks/latest/userguide/service-accounts.html)
+2. Add the exact registry host from the report to Radar's Helm values and apply
+   them to the release. Use a comma-separated value for multiple hosts.
+
+   ```yaml
+   env:
+     - name: RADAR_JAVA4SHELL_ECR_REGISTRIES
+       value: "123456789012.dkr.ecr.us-east-1.amazonaws.com"
+   ```
+
+3. Once the updated Radar Pod is running, rerun the check as a signed-in user
+   with the Pod read and exec permissions above.
+
+Radar tries anonymous reads first and disables EC2 instance metadata credential
+discovery. It checks private access on every scan. Only Pods with matching
+credential access share a private result within a scan. Credentials travel over
+HTTPS, and Radar pins registry connections to checked addresses and refuses
+loopback and link-local addresses.
 
 ### Prometheus metrics
 

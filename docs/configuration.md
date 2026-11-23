@@ -293,6 +293,42 @@ This setting applies only to that launch. If the window opens black or the app c
 
 For the separate [upstream NVIDIA crash](https://bugs.webkit.org/show_bug.cgi?id=327542), run `kubectl radar` and open the printed URL in your browser.
 
+## Java4Shell CLI
+
+`radar check java4shell` runs the same declared-Java-version check as **Checks → Vulnerabilities**. It connects directly to Kubernetes using `KUBECONFIG` or the standard Kubernetes configuration and uses the selected context's namespace by default. Pass `--kubeconfig`, `--context`, and `--namespace` to select a different target. `--all-namespaces` (`-A`) requires cluster-wide permission to list Pods.
+
+```bash
+radar check java4shell -n payments
+kubectl radar check java4shell --context staging -n payments -o json --fail-on-match
+```
+
+**PATCH FIRST** appears in red when an image declares an affected Java version and its node reports AVX-512 VBMI. Each entry names the workload and container and gives the declared version and upstream advisory fix. Confirm the installed JVM and deploy the fixed build for its vendor. **Check node CPU** lists remaining matches whose node capability is unknown. Matches on nodes that appear to lack VBMI are lower priority. When a more urgent entry exists, the default report summarizes these lower-priority matches. Use `--details` to see each one. A workload with mixed placements appears once per container image, under its highest priority, with the CPU counts for its replicas. Coverage distinguishes missing Java declarations from failed checks.
+
+Table-mode scans automatically save the full JSON report to a private file in the system temporary directory. The table prints the path and a command to reopen the report offline. To keep it in a location you choose, pass `--save-report` with a new filename.
+
+```bash
+radar check java4shell -A --save-report java4shell.json
+radar check java4shell --from-report java4shell.json --details
+```
+
+Use `--details` to print all finding and assessment-gap rows, including image references and node evidence. The default report previews up to 20 entries per visible priority and ten gap rows. Use `-o json` to send the full report to stdout. In JSON mode a file is written only if you pass `--save-report`. Progress goes to stderr. Color is enabled for terminal output and honors `NO_COLOR`.
+
+Radar caps anonymous Docker Hub lookups at 24 uncached image groups per scan to conserve the shared quota. To check a full cluster without that per-run cap, run `docker login` on the machine running Radar, then add `--docker-hub-auth`. Radar uses that login for Docker Hub first, drawing on the account’s pull quota, and still limits the rate of requests. Docker Hub can reject requests for either its six-hour pull quota or a separate traffic limit. Signing in can increase the pull quota. Slowing down helps with bursts. The report names the registry when it receives an HTTP 429. [Docker Hub pull limits](https://docs.docker.com/docker-hub/usage/pulls/) · [Docker Hub troubleshooting](https://docs.docker.com/docker-hub/troubleshoot/) · [Amazon ECR Public quotas](https://docs.aws.amazon.com/AmazonECR/latest/public/public-service-quotas.html)
+
+The command uses the caller's Kubernetes access and registry credentials, including readable pull secrets referenced by the Pods and [opt-in Amazon ECR access](authentication.md#java4shell-registry-access). CPU placement remains unknown where Node facts are unavailable. If a Pod reports a multi-platform image index digest, Radar needs the Node's platform to assess its Java version.
+
+For a private Amazon ECR image, the auth hint includes the registry hostname that Radar tried. Choose a local AWS profile with pull access to that repository. If the profile uses AWS IAM Identity Center, run `aws sso login --profile your-profile` first. Replace the example registry host below with the one shown in your report.
+
+```bash
+AWS_PROFILE=your-profile \
+  RADAR_JAVA4SHELL_ECR_REGISTRIES=123456789012.dkr.ecr.us-east-1.amazonaws.com \
+  radar check java4shell -A
+```
+
+Use a comma-separated list for multiple registry hosts. The AWS profile supplies the registry identity. Kubernetes admin access covers Kubernetes reads. For registries that use Docker credentials, run `docker login REGISTRY` on the machine running the CLI, then rerun the check.
+
+The command exits with `0` after a completed check and `1` if the check cannot run. With `--fail-on-match`, it exits with `2` after writing a result with at least one affected version declaration. This policy uses the declared Java version, including where CPU capability is unknown. Check the unassessed counts when deciding whether a result covers the containers your CI policy expects. For images where Radar finds no version declaration, `java_home_declared` counts containers whose image sets `JAVA_HOME`, and `no_java_declaration` counts the rest.
+
 ## AI Investigations Agent CLI
 
 Built-in AI investigations run an agent CLI installed on the machine Radar runs
@@ -972,6 +1008,8 @@ The pick belongs to the browser tab. Picking in one tab doesn't change your othe
 The pick narrows Radar's own views only, and only because the UI sends it with each request. An API read that names no namespace (`?namespace=` / `?namespaces=`) never inherits a remembered pick: it returns everything you're allowed to see, within the `--namespace-scope` pin when one is set. So the same user reading through another client — AI tools over MCP, Radar Cloud's fleet-wide views and background pollers, or `curl` — is never quietly narrowed to a namespace picked while browsing. A few UI surfaces deliberately cover all your namespaces regardless of the pick: the namespace list in the ⌘K palette, the **My permissions** dialog, and the standalone Cost view (which disables the picker). Home's Cost Insights card follows the pick.
 
 Until you make a pick, local sessions default to the namespace set on the kubeconfig context (kubectl parity — the same namespace `kubectl` would use, including one set via `kubectl config set-context` or `kubens`). An explicit `--namespace` / `--namespaces` flag outranks the kubeconfig value, and contexts without either default to **All namespaces**. Once you pick namespaces or explicitly choose **All namespaces**, that choice is what new tabs start from for the context and the kubeconfig value is no longer consulted.
+
+The picker's list comes from a live namespace LIST. When that LIST fails for a reason other than RBAC (a timeout right after switching clusters, while caches are still loading, is the usual one), Radar answers from its namespace cache once that has synced, and otherwise with only the context and `--namespace` namespaces. Either way the response carries `listFailed`: the UI asks again until a LIST succeeds (after 3s, backing off to 30s), and doesn't drop a tab's pick by a list that may lag a namespace created moments ago.
 
 When Radar starts with `--namespace-scope`, the picker controls the process-wide cache scope instead of just a view filter, so it is one setting for every tab and every user. Namespaced informer caches are pinned to one namespace while cluster-scoped resources remain cluster-wide. Local/no-auth sessions can switch the scoped namespace, which rebuilds the cache in place. Auth-enabled and Radar Cloud sessions lock the picker to the startup namespace so one user cannot reshape the shared backend cache for everyone.
 
