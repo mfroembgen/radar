@@ -30,6 +30,8 @@ export interface RadarFeatureSpec {
 }
 
 export const RADAR_FEATURES = {
+  datadogRightsizing: { label: 'Datadog-backed rightsizing', flag: 'datadogRightsizing', flagShippedWithEndpoint: true, requireAffirmativeSupport: true },
+  datadogAgentPresence: { label: 'Datadog Agent setup hints', flag: 'datadogAgentPresence', flagShippedWithEndpoint: true },
   resourceReadCoverage: { label: 'Resource read coverage', flag: 'resourceReadCoverage', flagShippedWithEndpoint: true },
   searchCoverage: { label: 'Search coverage and object filters', flag: 'searchCoverage', flagShippedWithEndpoint: true },
   applicationEvidence: { label: 'Application evidence collection', flag: 'applicationEvidence', flagShippedWithEndpoint: true },
@@ -46,8 +48,18 @@ export const RADAR_FEATURES = {
   applications: { label: 'Applications', minimumVersion: 'v1.7.7' },
   workloadHistory: { label: 'Workload history', flag: 'workloadHistory', flagShippedWithEndpoint: true },
   deploymentPause: { label: 'Deployment rollout pause and resume', flag: 'deploymentPause', flagShippedWithEndpoint: true },
+  substrateHealthMetrics: { label: 'Agent Substrate charts', flag: 'substrateHealthMetrics', flagShippedWithEndpoint: true, requireAffirmativeSupport: true },
   cnpgWorkspace: { label: 'CloudNativePG views', flag: 'cnpgWorkspace', flagShippedWithEndpoint: true },
+  sealedSecretsController: { label: 'Sealed Secrets controller status', flag: 'sealedSecretsController', flagShippedWithEndpoint: true },
   cnpgProtectionSetup: { label: 'CloudNativePG backup setup', flag: 'cnpgProtectionSetup', flagShippedWithEndpoint: true },
+  veleroWorkspace: { label: 'Velero views', flag: 'veleroWorkspace', flagShippedWithEndpoint: true },
+  veleroBackupNow: { label: 'Back up now', flag: 'veleroBackupNow', flagShippedWithEndpoint: true },
+  veleroSchedulePause: { label: 'Pause and resume Velero schedules', flag: 'veleroSchedulePause', flagShippedWithEndpoint: true },
+  veleroRunVolumes: { label: 'Velero run volumes', flag: 'veleroRunVolumes', flagShippedWithEndpoint: true },
+  veleroRunArtifacts: { label: 'Velero run contents and log', flag: 'veleroRunArtifacts', flagShippedWithEndpoint: true },
+  veleroRuns: { label: 'Velero backup and restore lists', flag: 'veleroRuns', flagShippedWithEndpoint: true },
+  veleroDeleteBackup: { label: 'Delete a Velero backup', flag: 'veleroDeleteBackup', flagShippedWithEndpoint: true },
+  resourceDeletePreconditions: { label: 'Delete only the object you reviewed', flag: 'resourceDeletePreconditions', flagShippedWithEndpoint: true },
   gitopsWriteEvidence: { label: 'GitOps revert warnings', flag: 'gitopsWriteEvidence', flagShippedWithEndpoint: true },
   serviceEndpointSlices: { label: 'Service EndpointSlice inventories', flag: 'serviceEndpointSlices', flagShippedWithEndpoint: true },
   trafficRecords: { label: 'Flow records for a graph selection', flag: 'trafficRecords', flagShippedWithEndpoint: true },
@@ -72,6 +84,13 @@ export const RADAR_FEATURES = {
   helmInventory: { label: 'Helm releases without Secret access', flag: 'helmInventory', flagShippedWithEndpoint: true },
   agentSigninCheck: { label: 'Agent sign-in checks', flag: 'agentSigninCheck', flagShippedWithEndpoint: true },
   podFileUpload: { label: 'Pod file uploads', flag: 'podFileUpload', flagShippedWithEndpoint: true },
+  vulnerabilities: { label: 'Vulnerability views', flag: 'vulnerabilities', flagShippedWithEndpoint: true },
+  vulnerabilitiesExport: { label: 'Vulnerability CSV downloads', flag: 'vulnerabilitiesExport', flagShippedWithEndpoint: true },
+  runtimeAdvisoryChecks: { label: 'Java4Shell checks', flag: 'runtimeAdvisoryChecks', flagShippedWithEndpoint: true },
+  runtimeAdvisoryProgress: { label: 'Java4Shell scan progress', flag: 'runtimeAdvisoryProgress', flagShippedWithEndpoint: true },
+  // Never blocks a control: an older Radar ignores the request body and names
+  // the Job itself, so Trigger stays one click without the Job name dialog.
+  cronJobTriggerJobName: { label: 'Job names for manual CronJob runs', flag: 'cronJobTriggerJobName', flagShippedWithEndpoint: true },
 } as const satisfies Record<string, RadarFeatureSpec>
 
 export type RadarFeature = keyof typeof RADAR_FEATURES

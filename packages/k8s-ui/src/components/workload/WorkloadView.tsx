@@ -9,6 +9,7 @@ import { useProgressiveRefresh } from '../../hooks/useProgressiveRefresh'
 import { startViewTransitionSafe } from '../../utils/view-transition'
 import { FetchResult } from '../ui/FetchResult'
 import { PaneLoader } from '../ui/PaneLoader'
+import { EmptyState } from '../ui/EmptyState'
 import { useRegisterShortcuts } from '../../hooks/useKeyboardShortcuts'
 import { clsx } from 'clsx'
 import {
@@ -172,6 +173,13 @@ interface WorkloadViewProps {
   statusNote?: ReactNode
   /** Leave out the kind badge, for a host whose title prefix already names the kind. */
   hideKindBadge?: boolean
+  /**
+   * With inlineBadges: keep the title on one line, cutting a long name (whole
+   * on hover) rather than wrapping the badges and actions below it. The badges
+   * give way first, wrapping among themselves down to their widest one, then
+   * the name is cut.
+   */
+  truncateName?: boolean
   /** Suppress the standalone back arrow — for embeddings where "back" has no
    *  meaningful target (a single-workload app has no app graph to return to). */
   hideBackButton?: boolean
@@ -351,6 +359,8 @@ interface WorkloadViewProps {
     resource: any
     context: 'drawer' | 'expanded'
     onNavigate?: NavigateToResource
+    /** The resource's operational issues, for a summary that shows them itself. */
+    leadContent?: ReactNode
   }) => ReactNode
   /** Extra tabs for the expanded view (e.g. a domain's own sections). */
   extraTabs?: WorkloadExtraTab[]
@@ -468,6 +478,7 @@ export function WorkloadView({
   renderStatusBadge,
   statusNote,
   hideKindBadge = false,
+  truncateName = false,
   hideBackButton,
   scopeControls,
   compactHeader,
@@ -650,7 +661,6 @@ export function WorkloadView({
       groupByApp: true,
     })
   }, [allEvents, topology, kind, group, namespace, name, historyScoped])
-  const historyNotes = useMemo(() => workloadHistoryNotes(historyCoverage, historyGaps), [historyCoverage, historyGaps])
 
   // Topology tab — the seeded neighborhood around this one workload (its
   // ownership core + attached Services/config/policies), not the whole namespace.
@@ -974,7 +984,10 @@ export function WorkloadView({
   const podEvidenceLoading = resourceLoading || workloadPodsLoading || eventsLoading
   const logsFallbackReady = !renderLogsTab || (!logsTabVisible && !podEvidenceLoading)
   const requestedTab: TabType = activeTab
-  const summaryContext = { kind, apiKind, namespace, name, group, resource, onNavigate: onNavigateToResource }
+  const summaryContext = {
+    kind, apiKind, namespace, name, group, resource, onNavigate: onNavigateToResource,
+    leadContent: renderSummaryForState && (hasOverviewLead ?? hasOperationalIssues) && renderOverviewLeadForState ? renderOverviewLeadForState({ kind, namespace, name }) : undefined,
+  }
   const expandedSummary = expanded && resource ? renderSummaryForState?.({ ...summaryContext, context: 'expanded' }) ?? null : null
   const drawerSummary = !expanded && resource ? renderSummaryForState?.({ ...summaryContext, context: 'drawer' }) ?? null : null
   const tabs: DetailShellTab<TabType>[] = [
@@ -1226,7 +1239,13 @@ export function WorkloadView({
   // ── Expanded (full) mode ─────────────────────────────────────────────────
     const nameAndCopy = (
       <>
-        <h1 className="text-lg font-semibold text-theme-text-primary truncate">{name}</h1>
+        {truncateName ? (
+          <Tooltip content={name} wrapperClassName="min-w-0">
+            <h1 className="min-w-0 text-lg font-semibold text-theme-text-primary truncate">{name}</h1>
+          </Tooltip>
+        ) : (
+          <h1 className="text-lg font-semibold text-theme-text-primary truncate">{name}</h1>
+        )}
         <Tooltip content="Copy name" delay={150}>
           <button
             onClick={() => copyToClipboard(name, 'name')}
@@ -1253,7 +1272,7 @@ export function WorkloadView({
           {namespace && namespace !== '_' && namespaceNote}
         </div>
       }
-      wrapHeader={inlineBadges}
+      wrapHeader={inlineBadges && !truncateName}
       subheader={resourceGone ? undefined : subheader}
       nav={
         breadcrumb || hideBackButton ? undefined : (
@@ -1323,10 +1342,10 @@ export function WorkloadView({
           // the line holds nothing else; the badges wrap below before that.
           return (
             <>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-theme-text-secondary">
+              <div className={clsx('flex items-center gap-x-3 gap-y-1 text-sm text-theme-text-secondary', !truncateName && 'flex-wrap')}>
                 {titlePrefix}
                 <div className="flex min-w-0 max-w-full items-center gap-2">{nameAndCopy}</div>
-                {coreBadges}
+                {truncateName ? <span className="flex shrink-[100] flex-wrap items-center gap-x-3 gap-y-1">{coreBadges}</span> : coreBadges}
               </div>
               {extraChips.length > 0 && (
                 <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-theme-text-secondary">{extraChips}</div>
@@ -1396,6 +1415,7 @@ export function WorkloadView({
       onTabChange={handleSetTab}
       scopeControls={scopeControls}
       tabStripEnd={<ResourceActionsBar key={actionsBarKey} resource={selectedResource} data={resource} hideLogs {...actionsBarPropsForState} />}
+      wrapTabStripEnd
       overlay={saveSuccess ? <SaveSuccessAnimation /> : null}
       compactHeader={compactHeader}
     >
@@ -1492,8 +1512,12 @@ export function WorkloadView({
             loadingOlder={loadingOlderHistory}
             olderError={olderHistoryError}
             scoped={historyScoped}
+            scopeText={isRuntimeWorkloadOverviewKind(apiKind, group) && ['apps', 'batch'].includes(apiVersionToGroup(resource?.apiVersion))
+              ? `This ${displayKindName(apiKind, resource?.kind)}, its recorded children and attached resources.`
+              : `Changes to this ${displayKindName(apiKind, resource?.kind)}.`}
             incomplete={historyIncomplete}
-            notes={historyNotes}
+            historyCoverage={historyCoverage}
+            historyGaps={historyGaps}
             error={historyError}
             onRetry={onRetryHistory}
             selectedEventId={selectedEventId}
@@ -1801,8 +1825,10 @@ function EventsTab({
   loadingOlder,
   olderError,
   scoped,
+  scopeText,
   incomplete,
-  notes = [],
+  historyCoverage,
+  historyGaps,
   error,
   onRetry,
   selectedEventId,
@@ -1818,9 +1844,10 @@ function EventsTab({
   loadingOlder?: boolean
   olderError?: Error | null
   scoped?: boolean
+  scopeText: string
   incomplete?: boolean
-  /** Coverage and access sentences from workloadHistoryNotes. */
-  notes?: string[]
+  historyCoverage?: WorkloadHistoryCoverage | null
+  historyGaps?: ReadGap[] | null
   error?: Error | null
   onRetry?: () => void
   selectedEventId: string | null
@@ -1951,6 +1978,31 @@ function EventsTab({
     )
   }
 
+  const notes = workloadHistoryNotes(historyCoverage, historyGaps)
+  const historySince = historyCoverage?.complete_since
+  const historyDetails = (
+    <ul className="space-y-1">
+      {incomplete && <li>Some past runs or related resources may be missing.</li>}
+      {notes.map((note, index) => <li key={note} title={index === 0 && historySince ? new Date(historySince).toLocaleString() : undefined}>{note}</li>)}
+      {truncated && (
+        <li>
+          Older history exists.{' '}
+          {olderError && <span className="text-[var(--color-error)]" title={olderError.message}>Couldn't load older events. </span>}
+          {onLoadOlder && (
+            <button
+              type="button"
+              onClick={onLoadOlder}
+              disabled={loadingOlder}
+              className="underline decoration-theme-border underline-offset-2 hover:text-theme-text-primary disabled:opacity-60"
+            >
+              {loadingOlder ? 'Loading…' : olderError ? 'Try again' : 'Load older'}
+            </button>
+          )}
+        </li>
+      )}
+    </ul>
+  )
+
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {focusEvent && !focusFound && (
@@ -1978,84 +2030,93 @@ function EventsTab({
           )}
         </div>
       )}
-      {(scoped || truncated || incomplete || notes.length > 0) && (
-        <div className="shrink-0 flex flex-wrap items-center gap-x-2 gap-y-0.5 border-b border-theme-border bg-theme-base px-4 py-1.5 text-xs text-theme-text-secondary" role="note">
-          {scoped && (
-            <span className="text-theme-text-tertiary">
-              This workload, what it runs, and the Services, Ingresses, config and scalers attached to it.
-            </span>
-          )}
-          {incomplete && <span>Some past runs or related resources may be outside the history Radar can follow.</span>}
-          {notes.map((note) => <span key={note}>{note}</span>)}
-          {truncated && <span>Showing the most recent events. Older history exists.</span>}
-          {truncated && olderError && (
-            <span className="text-[var(--color-error)]" title={olderError.message}>Couldn't load older events.</span>
-          )}
-          {truncated && onLoadOlder && (
-            <button
-              type="button"
-              onClick={onLoadOlder}
-              disabled={loadingOlder}
-              className="underline decoration-theme-border underline-offset-2 hover:text-theme-text-primary disabled:opacity-60"
-            >
-              {loadingOlder ? 'Loading…' : olderError ? 'Try again' : 'Load older'}
-            </button>
-          )}
+      {scoped && (
+        <div className="shrink-0 border-b border-theme-border bg-theme-surface px-4 py-3 text-sm leading-relaxed text-theme-text-secondary" role="note">
+          {scopeText}
         </div>
       )}
-      {/* Swimlane — the shared TimelineSwimlanes widget (kind chips, top axis with
-          ticks + Now line, event clustering), flat + compact for a single subject.
-          Its drawer is suppressed (compact); the list below is the detail surface. */}
-      <div className="shrink-0 border-b border-theme-border">
-        <TimelineSwimlanes
-          events={cleanEvents}
-          grouping="flat"
-          compact
-          topology={topology}
-          onResourceClick={onResourceClick}
-          viewWindow={viewWindow ?? undefined}
-          bounds={bounds ?? undefined}
-          nowMs={now}
-          isLive={userWindow == null}
-          onViewWindowChange={(w) => {
-            const now = Date.now()
-            const MIN = 15 * 60_000
-            let { fromMs, toMs } = w
-            // Floor zoom-in at ~15 min: a tiny empty sub-window strands the user
-            // (the "move the strip above" hint has no strip here).
-            if (toMs - fromMs < MIN) {
-              const c = (fromMs + toMs) / 2
-              fromMs = c - MIN / 2
-              toMs = c + MIN / 2
+      {cleanEvents.length === 0 ? (
+        <div className="min-h-0 flex-1 overflow-auto p-4">
+          <EmptyState
+            icon={Activity}
+            className="max-w-2xl"
+            headline="No recorded activity"
+            body={
+              <div className="space-y-4 text-sm leading-relaxed">
+                <p>{events.length > 0
+                  ? 'The recorded events have no usable timestamps to display.'
+                  : 'No changes were found in the history Radar holds for this resource.'}</p>
+                {(truncated || incomplete || notes.length > 0) && (
+                  <div className="space-y-1 border-t border-theme-border pt-3 text-left text-xs leading-relaxed text-theme-text-tertiary" role="note">
+                    {historyDetails}
+                  </div>
+                )}
+              </div>
             }
-            // Never pan/zoom past now: shift the window back so its right edge is
-            // at most the present (there's nothing in the future to show).
-            if (toMs > now) {
-              const width = toMs - fromMs
-              toMs = now
-              fromMs = now - width
-            }
-            setUserWindow({ fromMs, toMs })
-          }}
-          selectedEventId={selectedEventId}
-          onSelectedEventChange={handleSelect}
-        />
-      </div>
+          />
+        </div>
+      ) : (
+        <>
+          {(truncated || incomplete || notes.length > 0) && (
+            <div className="shrink-0 space-y-2 border-b border-theme-border bg-theme-base px-4 py-3 text-sm leading-relaxed text-theme-text-secondary" role="note">
+              {historyDetails}
+            </div>
+          )}
+          {/* Swimlane — the shared TimelineSwimlanes widget (kind chips, top axis with
+              ticks + Now line, event clustering), flat + compact for a single subject.
+              Its drawer is suppressed (compact); the list below is the detail surface. */}
+          <div className="shrink-0 border-b border-theme-border">
+            <TimelineSwimlanes
+              events={cleanEvents}
+              grouping="flat"
+              compact
+              topology={topology}
+              onResourceClick={onResourceClick}
+              viewWindow={viewWindow ?? undefined}
+              bounds={bounds ?? undefined}
+              nowMs={now}
+              isLive={userWindow == null}
+              onViewWindowChange={(w) => {
+                const now = Date.now()
+                const MIN = 15 * 60_000
+                let { fromMs, toMs } = w
+                // Floor zoom-in at ~15 min: a tiny empty sub-window strands the user
+                // (the "move the strip above" hint has no strip here).
+                if (toMs - fromMs < MIN) {
+                  const c = (fromMs + toMs) / 2
+                  fromMs = c - MIN / 2
+                  toMs = c + MIN / 2
+                }
+                // Never pan/zoom past now: shift the window back so its right edge is
+                // at most the present (there's nothing in the future to show).
+                if (toMs > now) {
+                  const width = toMs - fromMs
+                  toMs = now
+                  fromMs = now - width
+                }
+                setUserWindow({ fromMs, toMs })
+              }}
+              selectedEventId={selectedEventId}
+              onSelectedEventChange={handleSelect}
+            />
+          </div>
 
-      {/* Event list — the shared TimelineList: same event icons/colors as the
-          swimlane, kind badge + resource link, namespace, message, and inline diff,
-          all shown directly. compact drops its toolbar (the swimlane above owns the
-          window). */}
-      <div className="min-h-0 flex-1">
-        <TimelineList
-          compact
-          events={cleanEvents}
-          isLoading={false}
-          onResourceClick={onResourceClick}
-          selectedEventId={selectedEventId}
-          onSelectEvent={handleSelect}
-        />
-      </div>
+          {/* Event list — the shared TimelineList: same event icons/colors as the
+              swimlane, kind badge + resource link, namespace, message, and inline diff,
+              all shown directly. compact drops its toolbar (the swimlane above owns the
+              window). */}
+          <div className="min-h-0 flex-1">
+            <TimelineList
+              compact
+              events={cleanEvents}
+              isLoading={false}
+              onResourceClick={onResourceClick}
+              selectedEventId={selectedEventId}
+              onSelectEvent={handleSelect}
+            />
+          </div>
+        </>
+      )}
     </div>
   )
 }
@@ -4009,11 +4070,10 @@ function ConfigurationInputsCard({
   ])
   if (!serviceAccountName && configRefs.length === 0 && policyRefs.length === 0) return null
   const navigateRef = onNavigate ? (ref: ResourceRef) => onNavigate(refToSelectedResource(ref)) : undefined
-  const serviceAccountRef: ResourceRef = {
-    kind: 'ServiceAccount',
-    namespace,
-    name: serviceAccountName || 'default',
-  }
+  // The relationships' own ref carries whether the viewer may open it.
+  const serviceAccountRef: ResourceRef = relationships?.serviceAccount?.name === (serviceAccountName || 'default')
+    ? relationships.serviceAccount
+    : { kind: 'ServiceAccount', namespace, name: serviceAccountName || 'default' }
 
   return (
     <OverviewCard

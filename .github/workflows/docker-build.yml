@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: fork-image-1.20.3
+  group: fork-image-1.21.2
   cancel-in-progress: false
 
 permissions:
@@ -12,13 +12,13 @@ permissions:
   packages: write
 
 env:
-  SOURCE_SHA: d42152b7554433b978741e5b7fdbafe8a736de03
-  UPSTREAM_RELEASE_SHA: bb22349bef1be6347ca1c4661c7c5a16fffb028c
-  RELEASE_VERSION: 1.20.3
+  SOURCE_SHA: ae639a40f4e01655f31ee8b22de934e252fc5169
+  UPSTREAM_RELEASE_SHA: 94b60427cdd067edaf46a64e3acb9c462712eef3
+  RELEASE_VERSION: 1.21.2
   DOCKER_REPO: ghcr.io/mfroembgen/radar
-  # The one tag this build may replace: the undeployed 1.20.3 built-in OAuth
-  # image from source 9e3509126. Any other existing tag stops the build.
-  REPLACES_DIGEST: sha256:625f6817708a1b639a69d1a555ec5210037b9d74d7705bd1087c581786c23cc6
+  # No 1.21.2 image exists yet, so this build replaces none: any existing tag
+  # stops it.
+  REPLACES_DIGEST: ''
 
 jobs:
   docker:
@@ -28,12 +28,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ env.SOURCE_SHA }}
-          fetch-depth: 3
+          fetch-depth: 4
       - name: Verify release base and source
         run: |
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          test "$(git rev-parse HEAD~2)" = "$UPSTREAM_RELEASE_SHA"
-          test "$(git rev-list --count "$UPSTREAM_RELEASE_SHA"..HEAD)" = 2
+          test "$(git rev-parse HEAD~3)" = "$UPSTREAM_RELEASE_SHA"
+          test "$(git rev-list --count "$UPSTREAM_RELEASE_SHA"..HEAD)" = 3
       - name: Refuse to replace an unexpected image tag
         run: |
           python3 - <<'PYTHON'

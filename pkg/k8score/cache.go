@@ -533,6 +533,11 @@ func NewResourceCache(cfg CacheConfig) (*ResourceCache, error) {
 				return fmt.Errorf("failed to index %s by owner: %w", s.kind, err)
 			}
 		}
+		if indexers := typedRelationIndexers(s.kind); indexers != nil {
+			if err := inf.AddIndexers(indexers); err != nil {
+				return fmt.Errorf("failed to index %s by what it names: %w", s.kind, err)
+			}
+		}
 
 		// Wire a WatchErrorHandler so reflector-level failures (most
 		// notably 403/Unauthorized that the probe didn't predict — e.g.
@@ -1501,9 +1506,19 @@ func (rc *ResourceCache) Stop() {
 	})
 }
 
-// Client returns the clientset the cache's informers were built from, so a
-// caller holding its own clientset can tell whether the cache describes the
-// same cluster connection before reading from it.
+// Done returns a channel closed when the cache is stopped, so work tied to
+// this cache's lifetime can let go of it once it is retired.
+func (rc *ResourceCache) Done() <-chan struct{} {
+	if rc == nil {
+		return nil
+	}
+	return rc.stopCh
+}
+
+// Client returns the clientset the cache's informers were built from. An
+// embedder that lists through a separate informer clientset must map its
+// request clientset to that informer clientset before comparing, or the
+// check never matches.
 func (rc *ResourceCache) Client() kubernetes.Interface {
 	if rc == nil {
 		return nil

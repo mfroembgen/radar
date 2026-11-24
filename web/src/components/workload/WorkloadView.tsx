@@ -1,5 +1,5 @@
 import { RelatedFindingsSection } from './RelatedFindingsSection'
-import { decorateResourceDiagnose, resourceDetailRedirect, resourceDetailSlots, resourceLogs, resourceRendererOverrides } from '../../integrations/resourceHosts'
+import { decorateResourceDiagnose, resourceDetailRedirect, resourceDetailSlots, resourceIssueDetail, resourceLogs, resourceRendererOverrides } from '../../integrations/resourceHosts'
 import { ApplicationEvidenceAction } from '../application-evidence/ApplicationEvidenceAction'
 import { useMemo, useEffect, useCallback, useRef, useState, type ReactNode } from 'react'
 import { useQueries, useQueryClient } from '@tanstack/react-query'
@@ -37,6 +37,8 @@ import {
 } from '@skyhook-io/k8s-ui'
 import type { ServicePortRenderProps } from '@skyhook-io/k8s-ui/components/resources/renderers/ServiceRenderer'
 import { isJobSetV1Alpha2 } from '@skyhook-io/k8s-ui/components/resources/resource-utils-jobset-lws'
+import { isCoreNode as isCoreNodeObject } from '@skyhook-io/k8s-ui/components/resources/resource-utils'
+import { SUBSTRATE_GROUP } from '@skyhook-io/k8s-ui/components/resources/resource-utils-agent-runtimes'
 import type { SelectedResource, ResourceRef, Relationships, ResourceWithRelationships } from '../../types'
 import { CronJobSchedulingContext, CronJobSchedulingDetails } from './CronJobSchedulingEvidence'
 import { NodeCertificateContext, NodeCertificateDetails, nodeCertificateContextVisible } from './NodeCertificateEvidence'
@@ -98,16 +100,18 @@ import {
   fetchJSON,
   fetchYamlSchemas,
 } from '../../api/client'
-import { PrometheusCharts, isPrometheusSupported } from '../resource/PrometheusCharts'
+import { TIME_RANGES, PrometheusCharts, isPrometheusSupported } from '../resource/PrometheusCharts'
+import { RightsizingStrip } from '../resource/RightsizingStrip'
 import { PrometheusChartsGrid } from '../resource/PrometheusChartsGrid'
+import { DatadogSetupHint, DatadogWorkloadCharts, useDatadogWorkloadCharts, WorkloadCostRightsizing } from '../resource/DatadogWorkloadCharts'
+import { useNavCustomization } from '../../context/NavCustomization'
 import { RestartEventLane } from '../resource/RestartChart'
-import { RightsizingPanel } from '../resource/RightsizingStrip'
 import { WorkloadCostTab } from '../cost/WorkloadCostTab'
 import { isOpenCostWorkloadKind } from '../cost/kinds'
 import { isRadarFeatureUnsupported } from '../../api/radarFeatures'
 import { useTrafficAvailable } from '../../api/traffic'
 import { isNotFoundError, useResourceAudit, useResourceIssues, useSubjectIssues, useRadarFeature, useTrace, fetchTraceWithProbes, fetchInClusterCapability, runInClusterMerged } from '../../api/client'
-import { AuditAlerts, getRadarUpgradeRequirement, ResourceIssuesSection, ReachabilityView, TraceSummary, InClusterConsentDialog, traceFingerprint, staticPollUnreliable, summarizeInClusterTests, type Trace as NetworkTrace, type InClusterCapability, inClusterConsentGiven, consentRequestRows } from '@skyhook-io/k8s-ui'
+import { AuditAlerts, getRadarUpgradeRequirement, ResourceIssuesSection, ReachabilityView, TraceSummary, InClusterConsentDialog, traceFingerprint, staticPollUnreliable, summarizeInClusterTests, type Trace as NetworkTrace, type InClusterCapability, inClusterConsentGiven, consentRequestRows, getDefaultLogContainerName, getLogContainerNames, getInitContainerNames } from '@skyhook-io/k8s-ui'
 import { WorkloadLogsViewer } from '../logs/WorkloadLogsViewer'
 import { ScheduledWorkloadLogsViewer } from '../logs/ScheduledWorkloadLogsViewer'
 import { LogsViewer } from '../logs/LogsViewer'
@@ -139,8 +143,12 @@ import { useDesktopDownload } from '../../hooks/useDesktopDownload'
 import { useCompareLauncher } from '../compare/useCompareLauncher'
 import { useDiagnoseCustomization } from '../../context/DiagnoseCustomization'
 import { NodeDrainStatus } from './NodeDrainStatus'
+import { SubstrateHealthCharts } from '../resource/SubstrateHealthCharts'
+import { SubstrateVerdictLine } from '../resource/SubstrateVerdictLine'
+import { useAPIResources } from '../../api/apiResources'
 import { recordUsageEvent } from '../../api/usage-data'
 import { issueResourceOpener } from './issueResourceOpener'
+import { isVeleroBackupKind } from '../velero/routes'
 
 type TabType = WorkloadTabType
 
@@ -171,6 +179,14 @@ export function supportsBatchExecution(kind: string, apiKind: string, group?: st
     return group === 'jobset.x-k8s.io' && isJobSetV1Alpha2({ kind, apiVersion })
   }
   return true
+}
+
+// Longhorn serves a `nodes` plural whose objects are also Kind Node; node metrics
+// only exist for the core Node.
+export function isPrometheusMetricsAvailable(kind: string, resource: any, coreNodeRoute: boolean): boolean {
+  if (!isPrometheusSupported(kind)) return false
+  if (kind === 'Node') return coreNodeRoute && isCoreNodeObject(resource)
+  return !(kind === 'Pod' && resource?.status?.phase === 'Pending')
 }
 
 // ============================================================================
@@ -295,6 +311,7 @@ interface WorkloadViewProps {
   statusNote?: ReactNode
   onRefresh?: () => Promise<unknown>
   hideKindBadge?: boolean
+  truncateName?: boolean
 }
 
 interface ImageTargetOwnershipContext {
@@ -384,6 +401,7 @@ function useActionsBarProps(
   const argoResumeMutation = useArgoResume()
   const { upgrade: argoResumeUpgrade, blockedReason: argoResumeBlockedReason } = useRadarFeature('argoAutoSyncEnable')
   const { support: argoInheritanceSupport } = useRadarFeature('argoSyncInheritance')
+  const { support: cronJobJobNameSupport } = useRadarFeature('cronJobTriggerJobName')
 
   const {
     data: cascadePreview,
@@ -428,10 +446,14 @@ function useActionsBarProps(
       className?: string
     }) => <PortForwardButton type={type} namespace={ns} name={n} className={className} />,
     renderDiagnose: decorateResourceDiagnose(renderDiagnose),
-    onDelete: (
-      params: Parameters<typeof deleteMutation.mutate>[0],
-      callbacks?: { onSuccess?: () => void },
-    ) => deleteMutation.mutate(params, { onSuccess: result => { if (!result.outcomeUnknown) callbacks?.onSuccess?.() } }),
+    // Deleting a Velero Backup object leaves the backup in storage and Velero
+    // recreates the object; the Velero host offers Delete backup instead.
+    onDelete: isVeleroBackupKind(kind, group)
+      ? undefined
+      : (
+          params: Parameters<typeof deleteMutation.mutate>[0],
+          callbacks?: { onSuccess?: () => void },
+        ) => deleteMutation.mutate(params, { onSuccess: result => { if (!result.outcomeUnknown) callbacks?.onSuccess?.() } }),
     isDeleting: deleteMutation.isPending,
     onDeletePreviewOpenChange: setDeletePreviewOpen,
     cascadeDetail: cascadePreview,
@@ -477,9 +499,11 @@ function useActionsBarProps(
       ? (params: { namespace: string; name: string }) =>
           rolloutDialogPromote.mutateAsync({ action: 'promote-full', ...params })
       : undefined,
+    // mutateAsync, not mutate: the Job name dialog stays open when this rejects.
     onTriggerCronJob: (params: Parameters<typeof triggerCronJobMutation.mutate>[0]) =>
-      triggerCronJobMutation.mutate(params),
+      triggerCronJobMutation.mutateAsync(params),
     isTriggeringCronJob: triggerCronJobMutation.isPending,
+    cronJobTriggerDialog: cronJobJobNameSupport === 'supported',
     onSuspendCronJob: (params: Parameters<typeof suspendCronJobMutation.mutate>[0]) =>
       suspendCronJobMutation.mutate(params),
     isSuspendingCronJob: suspendCronJobMutation.isPending,
@@ -628,6 +652,14 @@ export function WorkloadView({
   // of itself. Fall back to the group derived from the fetched resource, then
   // to undefined (which the gate treats as "group unknown → allow").
   const effectiveGroup = rest.group || resourceGroup || undefined
+  // The fetched resource's own group, once it has loaded: the route's group is
+  // '' whenever a link left ?apiGroup out.
+  const identityGroup = resource?.apiVersion ? resourceGroup : effectiveGroup
+  const isNode = apiKind === 'nodes' && !effectiveGroup
+  const isSubstrateWorkerPool = apiKind === 'workerpools' && effectiveGroup === SUBSTRATE_GROUP
+  // Substrate's node charts are asked of Prometheus only on a cluster that serves it.
+  const { data: apiResources } = useAPIResources()
+  const servesSubstrate = isNode && apiResources?.some(r => r.group === SUBSTRATE_GROUP && r.name === 'workerpools') === true
   const batchKind = pluralToKind(apiKind)
   const batchExecution = supportsBatchExecution(batchKind, apiKind, effectiveGroup, resource?.apiVersion)
   const batchRunsQuery = useWorkloadRuns(apiKind, namespace, name, expanded && batchExecution, {
@@ -1286,7 +1318,7 @@ export function WorkloadView({
             viewNamespaces={viewNamespaces}
           />
         )}
-        {...resourceDetailSlots({ kind: apiKind, group: resource?.apiVersion ? resourceGroup : effectiveGroup, namespace, name }, rest.extraTabs)}
+        {...resourceDetailSlots({ kind: apiKind, group: identityGroup, namespace, name }, rest.extraTabs)}
         onSelectTopologyMember={batchExecution && batchKind === 'JobSet' ? handleSelectTopologyMember : undefined}
         renderExpandedOverview={({ kind: k, apiKind, namespace: ns, name: n, resource: res, leadContent }) =>
           supportsBatchExecution(k, apiKind, effectiveGroup, res?.apiVersion) &&
@@ -1311,18 +1343,29 @@ export function WorkloadView({
         renderRelatedYaml={(ref) => (
           <RelatedResourceYaml key={`${ref.kind}/${ref.namespace}/${ref.name}`} target={ref} />
         )}
-        renderMetricsTab={({ kind, namespace: ns, name: n }) => (
-          <MetricsTabContent
-            kind={kind}
-            namespace={ns}
-            name={n}
-            resource={resource}
-            expanded={expanded}
+        renderMetricsTab={({ kind, namespace: ns, name: n }) => isSubstrateWorkerPool ? (
+          <SubstrateHealthCharts
+            target={{ kind: 'workerpool', namespace: ns, name: n }}
+            standalone
+            collapsible={!expanded}
+            workerPods={typeof resource?.status?.replicas === 'number' ? resource.status.replicas : undefined}
           />
+        ) : (
+          <>
+            <MetricsTabContent
+              kind={kind}
+              namespace={ns}
+              name={n}
+              resource={resource}
+              expanded={expanded}
+              fill={!(isNode && servesSubstrate)}
+            />
+            {isNode && servesSubstrate && <div className="pt-4"><SubstrateHealthCharts target={{ kind: 'node', name: n }} collapsible={!expanded} /></div>}
+          </>
         )}
         renderCostTab={({ kind, namespace: ns, name: n }) => (
           <div className="space-y-4">
-            <RightsizingPanel kind={kind} namespace={ns} name={n} />
+            <WorkloadCostRightsizing kind={kind} namespace={ns} name={n} />
             <WorkloadCostTab kind={kind} namespace={ns} name={n} />
           </div>
         )}
@@ -1348,16 +1391,23 @@ export function WorkloadView({
           />
         )}
         isMetricsAvailable={(kind, res) =>
-          isPrometheusSupported(kind) && !(kind === 'Pod' && res?.status?.phase === 'Pending')
+          isSubstrateWorkerPool || isPrometheusMetricsAvailable(kind, res, isNode)
         }
         isCostAvailable={(kind) => isOpenCostWorkloadKind(kind)}
         onDuplicate={handleDuplicate}
         onDownload={desktopDownload}
         actionsBarProps={actionsBarProps}
         rendererOverrides={resourceRendererOverrides}
-        renderOverviewIntro={apiKind === 'nodes' && !effectiveGroup && resource?.metadata?.uid
-          ? () => <NodeDrainStatus name={name} nodeUID={resource.metadata.uid} />
-          : undefined}
+        renderOverviewIntro={isSubstrateWorkerPool
+          ? ({ namespace: ns, name: n }) => <SubstrateVerdictLine target={{ kind: 'workerpool', namespace: ns, name: n }} onOpenMetrics={expanded ? () => handleTabChange('metrics') : undefined} />
+          : isNode && resource?.metadata?.uid
+            ? () => (
+              <div className="space-y-3">
+                <NodeDrainStatus name={name} nodeUID={resource.metadata.uid} />
+                {servesSubstrate && <SubstrateVerdictLine target={{ kind: 'node', name }} onOpenMetrics={expanded ? () => handleTabChange('metrics') : undefined} />}
+              </div>
+            )
+            : undefined}
         renderOverviewExtra={({ kind: k, namespace: ns, name: n, group: g, context }) => {
           // Network entry kinds (Service/Ingress/Route/Gateway) ARE the diagnosis
           // target: DiagnoseInlineSection renders in the drawer, no hint. Workload
@@ -1396,10 +1446,10 @@ export function WorkloadView({
             renderDetailSection={({ issue }) => {
               if (schedulingEvidence?.state === 'reported' && issue.kind === 'CronJob' && issue.reason === schedulingEvidence.reason) return <CronJobSchedulingDetails evidence={schedulingEvidence} onViewTimeline={viewSchedulingReport} />
               if (certificateEvidence && issue.kind === 'Node' && issue.reason === 'NodeCertificateExpiry') return <NodeCertificateDetails evidence={certificateEvidence} onViewTimeline={viewCertificateReport} includeOriginalReport={false} />
-              return null
+              return resourceIssueDetail({ kind: apiKind, group: resource?.apiVersion ? resourceGroup : effectiveGroup, namespace, name }, { issue, resource })
             }}
             compact={!expanded}
-            subjectResource={{ kind: apiKind, namespace, name, group: rest.group }}
+            subjectResource={{ kind: apiKind, namespace, name, group: identityGroup }}
             onResourceClick={openIssueResource}
           />
           </div>
@@ -1687,12 +1737,8 @@ function PodLogsTab({
   initialContainer?: string | null
   onConsumeInitialContainer?: () => void
 }) {
-  const containers = useMemo(() => {
-    const names: string[] = []
-    for (const c of resource?.spec?.initContainers || []) if (c.name) names.push(c.name)
-    for (const c of resource?.spec?.containers || []) if (c.name) names.push(c.name)
-    return names
-  }, [resource])
+  const containers = useMemo(() => getLogContainerNames(resource), [resource])
+  const initContainers = useMemo(() => getInitContainerNames(resource), [resource])
 
   // A terminated pod has nothing to follow — only stream live ones. Wait for
   // the phase to be known so a completed pod isn't briefly streamed while the
@@ -1712,7 +1758,8 @@ function PodLogsTab({
         namespace={namespace}
         podName={name}
         containers={containers}
-        initialContainer={initialContainer || undefined}
+        initialContainer={initialContainer || getDefaultLogContainerName(resource)}
+        initContainers={initContainers}
         autoStream={autoStream}
       />
     </div>
@@ -2222,32 +2269,63 @@ function DiagnoseInlineSection({ kind, namespace, name, group, onOpenReachabilit
 // Drawer mode: single chart + category tabs (compact for ~500px width).
 // Full-screen mode: multi-chart grid so CPU + Memory + Network can be
 // compared side-by-side without tab switching.
-function MetricsTabContent({
+export function MetricsTabContent({
   kind,
   namespace,
   name,
   resource,
   expanded,
+  fill = true,
 }: {
   kind: string
   namespace: string
   name: string
   resource: any
   expanded: boolean
+  /** False when content follows, so the tab scrolls everything as one. */
+  fill?: boolean
 }) {
-  if (expanded) {
+  const [params] = useSearchParams()
+  const range = TIME_RANGES.find((option) => option.value === params.get('metricsRange'))?.value ?? '1h'
+  const workload = { kind, namespace, name }
+  const { embedded = false } = useNavCustomization()
+  const { charts, rightsizing, checking, configured, setup } = useDatadogWorkloadCharts(workload, range, embedded)
+  if (configured) {
+    const workloadTotals = (
+      <DatadogWorkloadCharts charts={charts.data?.configured ? charts.data.charts : undefined}
+        loading={charts.isLoading} error={charts.error} onRetry={() => void charts.refetch()} />
+    )
+    if (rightsizing) return (
+      <div className={fill ? 'h-full overflow-auto' : undefined}>
+        <PrometheusChartsGrid {...workload} resource={resource} workloadTotals={workloadTotals} fill={false} showRightsizing={false} />
+        <div className="px-4 pb-4">{rightsizing}</div>
+      </div>
+    )
+    return <PrometheusChartsGrid {...workload} resource={resource} workloadTotals={workloadTotals} fill={fill} />
+  }
+  if (checking) return <p role="status" className="p-4 text-sm text-theme-text-secondary">Loading workload metrics…</p>
+
+  const setupHint = setup && <DatadogSetupHint owner={setup === 'owner'} />
+  if (rightsizing || !expanded) {
     return (
-      <div className="flex flex-col h-full">
-        <div className="flex-1 min-h-0">
-          <PrometheusChartsGrid kind={kind} namespace={namespace} name={name} resource={resource} />
-        </div>
+      <div className={fill ? 'h-full overflow-auto' : undefined}>
+        {setupHint}
+        {expanded
+          ? <PrometheusChartsGrid {...workload} resource={resource} fill={false} showRightsizing={false} />
+          : <DrawerMetricsContent {...workload} resource={resource} />}
+        <div className="px-4 pb-4">{rightsizing ?? <RightsizingStrip {...workload} />}</div>
       </div>
     )
   }
-
-  // Drawer fallback: single chart with tabs + restart lane below. The chart's
-  // time-range selector is mirrored to the restart lane so they stay aligned.
-  return <DrawerMetricsContent kind={kind} namespace={namespace} name={name} resource={resource} />
+  if (!fill) return <PrometheusChartsGrid {...workload} resource={resource} fill={false} />
+  return (
+    <div className="flex flex-col h-full">
+      {setupHint}
+      <div className="flex-1 min-h-0">
+        <PrometheusChartsGrid {...workload} resource={resource} />
+      </div>
+    </div>
+  )
 }
 
 function DrawerMetricsContent({

@@ -1,8 +1,11 @@
+import type { RightsizingRow, WorkloadRightsizingEvidence } from '@skyhook-io/k8s-ui/types/rightsizing'
+import { followSwitch, switchFinished, switchInProgress, type ContextSwitchOperation } from './contextSwitch'
 import { createListRefetchInterval, normalizeResourceList, type ResourceListBody, type ResourceListResult } from './resourceLists'
 import type { CascadeDetail } from '@skyhook-io/k8s-ui/components/ui/ForceDeleteConfirmDialog'
 import { canonicalResourceGroup } from '@skyhook-io/k8s-ui/utils/api-resources'
 import { pluralize } from '@skyhook-io/k8s-ui/utils/pluralize'
 import type { ReadGap, ReadGapSet } from '@skyhook-io/k8s-ui/types/read-coverage'
+import type { ClusterScope } from '@skyhook-io/k8s-ui/types/cluster-scope'
 import type { WorkloadHistoryCoverage } from '@skyhook-io/k8s-ui/utils/workload-history-notes'
 import { knownKindForPluralWithGroup, pluralToKind } from '@skyhook-io/k8s-ui/utils/navigation'
 import { useEffect, useRef, useCallback, useMemo } from 'react'
@@ -26,6 +29,7 @@ import type {
   CapacityOverviewResponse,
   CapacityPoolDetailResponse,
   CapacityPoolListResponse,
+  NamespaceCollection,
   SetWorkloadImagesResult,
   WorkloadImageInventory,
   WorkloadImageUpdate,
@@ -77,6 +81,7 @@ import type {
 } from '../types'
 import type { GitOpsOperationResponse } from '../types/gitops'
 import { apiUrl, automaticRequestHeaders, getApiBase, getAuthHeaders, getCredentialsMode, getBasename, routePath, stripBasename } from './config'
+import { CONNECTION_HEADER, connectionHeaderValue } from './connectionBinding'
 import { httpStatusMessage, markShownInline, readErrorBody, readErrorResponse } from './httpErrors'
 import {
   RadarFeatureUnsupportedError,
@@ -90,6 +95,7 @@ import {
 } from './radarFeatures'
 import { useRadarUpgradeHost } from '../context/RadarUpgradeHost'
 import { apiVersionToGroup } from '../utils/navigation'
+import { isBadgeWorthy } from '../utils/auditBadges'
 import type { DeploymentMode } from '../types'
 
 // Auto-refresh cadences (ms) — named constants for each polled hook's
@@ -160,6 +166,10 @@ export function apiFetch(
   for (const [k, v] of Object.entries(getAuthHeaders())) {
     if (!headers.has(k)) headers.set(k, v);
   }
+  // Name the connection this tab is on, so the server can refuse a write
+  // meant for a cluster it no longer serves (see connectionBinding.ts).
+  const connection = connectionHeaderValue();
+  if (connection && !headers.has(CONNECTION_HEADER)) headers.set(CONNECTION_HEADER, connection);
   return fetch(input, {
     credentials: getCredentialsMode(),
     ...init,
@@ -712,7 +722,7 @@ export interface DashboardResponse {
     maxVersion: string;
   } | null;
   deferredLoading?: boolean; // True while deferred informers (secrets, events, etc.) are still syncing
-  partialData?: string[]; // Critical kinds promoted at first paint that haven't yet finished syncing (live-filtered)
+  partialData?: string[]; // Resources still loading after the initial wait
   accessRestricted?: boolean; // True when user has no namespace access (RBAC)
 }
 
@@ -739,12 +749,60 @@ export function useDashboard(
 export function useAudit(namespaces: string[] = []) {
   const params =
     namespaces.length > 0 ? `?namespaces=${namespaces.join(",")}` : "";
-  // Mounted app-wide, so without this it keeps polling a cluster that is down.
+  // Without the connection check a mounted view keeps polling a cluster that
+  // is down.
   const connected = useClusterConnected();
+  const queryClient = useQueryClient();
   return useQuery<AuditResponse>({
     queryKey: ["audit", namespaces],
-    queryFn: () => fetchJSON(`/audit${params}`),
+    queryFn: async () => {
+      const audit = await fetchJSON<AuditResponse>(`/audit${params}`);
+      // Resource badges read the same scan through their own smaller query.
+      // A fresher full scan has them refetch rather than show a different
+      // answer: invalidating, unlike writing the projection, can't install an
+      // older scan or one from before a context switch. An in-flight badges
+      // request may predate this scan, and a first request isn't restarted by
+      // invalidation, so it is cancelled first. This runs with the fetch, not
+      // the view, so leaving the page mid-fetch doesn't skip it.
+      const badges = ["audit", namespaces, "badges"];
+      await queryClient.cancelQueries({ queryKey: badges, exact: true });
+      void queryClient.invalidateQueries({ queryKey: badges, exact: true });
+      return audit;
+    },
     enabled: connected,
+    staleTime: 30000,
+    refetchInterval: AUDIT_REFRESH_INTERVAL_MS,
+    placeholderData: (prev) => prev,
+  });
+}
+
+export type AuditBadges = Pick<AuditResponse, "findings" | "checks">;
+
+// Keeps only what a badge view shows: findings of badge-worthy checks and
+// those checks' catalog entries. A Radar that predates include=badges answers
+// with the full response, which this cuts down rather than retaining.
+export function projectAuditBadges(response: AuditBadges): AuditBadges {
+  const findings = (response.findings ?? []).filter((f) => isBadgeWorthy(f, response.checks));
+  const checks: AuditBadges["checks"] = {};
+  for (const f of findings) checks[f.checkID] = response.checks[f.checkID];
+  return { findings, checks };
+}
+
+// The audit as resource badges need it (topology, resource lists): the
+// badge-worthy findings only, a small fraction of the full scan, which repeats
+// every finding per resource and per check for the Checks page.
+export function useAuditBadges(
+  namespaces: string[] = [],
+  options: { enabled?: boolean } = {},
+) {
+  const params = new URLSearchParams({ include: "badges" });
+  if (namespaces.length > 0) params.set("namespaces", namespaces.join(","));
+  const connected = useClusterConnected();
+  return useQuery<AuditBadges>({
+    queryKey: ["audit", namespaces, "badges"],
+    // The signal lets a superseded request stop downloading, not just lose.
+    queryFn: async ({ signal }) => projectAuditBadges(await fetchJSON<AuditBadges>(`/audit?${params}`, signal)),
+    enabled: connected && (options.enabled ?? true),
     staleTime: 30000,
     refetchInterval: AUDIT_REFRESH_INTERVAL_MS,
     placeholderData: (prev) => prev,
@@ -1186,7 +1244,12 @@ export type CostUnavailableReason =
   | "metrics_settings_error"
   | "cost_settings_error"
   | "history_unsupported"
-  | "insufficient_history";
+  | "insufficient_history"
+  // The metrics store holds several clusters and these costs couldn't be
+  // kept to this one; clusterScope says why.
+  | "cluster_scope"
+  // The metrics store answered partially, so totals could miss series.
+  | "partial_data";
 
 export type CostDataSource = "prometheus" | "kubecost";
 
@@ -1204,6 +1267,11 @@ export interface OpenCostSummary {
   clusterEfficiency?: number;
   namespaceScope?: string[];
   namespaces?: OpenCostNamespaceCost[];
+  /** How a metrics-store answer was kept to this cluster; older Radar omits it. */
+  clusterScope?: ClusterScope;
+  /** Efficiency and idle couldn't be measured (not zero); usageClusterScope says why. */
+  efficiencyUnavailable?: boolean;
+  usageClusterScope?: ClusterScope;
 }
 
 const costDiscoveryFirstSeenAt = new Map<string, number>();
@@ -1282,6 +1350,11 @@ export interface OpenCostWorkloadResponse {
   currency?: string;
   namespace: string;
   workloads: OpenCostWorkloadCost[];
+  /** How a metrics-store answer was kept to this cluster; older Radar omits it. */
+  clusterScope?: ClusterScope;
+  /** Efficiency and idle couldn't be measured (not zero); usageClusterScope says why. */
+  efficiencyUnavailable?: boolean;
+  usageClusterScope?: ClusterScope;
 }
 
 export function useOpenCostWorkloads(
@@ -1315,6 +1388,11 @@ export interface OpenCostWorkloadDetailResponse {
   kind: string;
   name: string;
   current?: OpenCostWorkloadCost;
+  /** How a metrics-store answer was kept to this cluster; older Radar omits it. */
+  clusterScope?: ClusterScope;
+  /** Efficiency and idle couldn't be measured (not zero); usageClusterScope says why. */
+  efficiencyUnavailable?: boolean;
+  usageClusterScope?: ClusterScope;
 }
 
 export function useOpenCostWorkload(
@@ -1362,6 +1440,8 @@ export interface OpenCostTrendResponse {
   windowEnd?: number;
   dataThrough?: string;
   series?: OpenCostTrendSeries[];
+  /** How a metrics-store answer was kept to this cluster; older Radar omits it. */
+  clusterScope?: ClusterScope;
 }
 
 export function useOpenCostTrend(range_: CostTimeRange = "24h") {
@@ -1389,6 +1469,8 @@ export interface OpenCostWorkloadTrendResponse {
   range: string;
   windowTotalCost?: number;
   dataPoints?: OpenCostTrendDataPoint[];
+  /** How a metrics-store answer was kept to this cluster; older Radar omits it. */
+  clusterScope?: ClusterScope;
 }
 
 export function useOpenCostWorkloadTrend(
@@ -1463,6 +1545,8 @@ export interface OpenCostApplicationCostResponse {
   totals: OpenCostApplicationCostTotals;
   coverage: OpenCostApplicationCostCoverage;
   workloads?: OpenCostApplicationWorkloadCost[];
+  /** How a metrics-store answer was kept to this cluster; older Radar omits it. */
+  clusterScope?: ClusterScope;
 }
 
 export interface OpenCostApplicationCostTrendSeries extends OpenCostApplicationWorkloadRef {
@@ -1481,6 +1565,8 @@ export interface OpenCostApplicationCostTrendResponse {
   dataPoints?: OpenCostTrendDataPoint[];
   series?: OpenCostApplicationCostTrendSeries[];
   coverage: OpenCostApplicationCostCoverage;
+  /** How a metrics-store answer was kept to this cluster; older Radar omits it. */
+  clusterScope?: ClusterScope;
 }
 
 function stableOpenCostWorkloadRefs(
@@ -1570,6 +1656,8 @@ export interface OpenCostNodeResponse {
   dataThrough?: string;
   currency?: string;
   nodes?: OpenCostNodeCost[];
+  /** How a metrics-store answer was kept to this cluster; older Radar omits it. */
+  clusterScope?: ClusterScope;
 }
 
 export function useOpenCostNodes() {
@@ -2074,9 +2162,10 @@ export function useApplyDesktopUpdate() {
       }
       return response.json();
     },
+    // No success toast: the update card shows the restart, in the corner a
+    // toast would cover.
     meta: {
       errorMessage: "Failed to apply update",
-      successMessage: "Update applied — restarting...",
     },
   });
 }
@@ -2202,8 +2291,31 @@ export function useCapabilities() {
     staleTime: 60000, // 1 minute - cached on backend too
     // Re-check periodically so transient failures self-correct, but not while
     // the cluster is down: reconnecting refreshes every query anyway.
-    refetchInterval: connected ? 60000 : false,
+    refetchInterval: (query) => connected ? capabilitiesRefetchInterval(query, 60000) : false,
   });
+}
+
+// A result built on a failed access check is kept by the server for only 5s;
+// ask again soon, backing off while the checks keep failing.
+export function capabilitiesRefetchInterval(
+  query: { state: { dataUpdatedAt: number; data?: Pick<Capabilities, "checksIncomplete"> } },
+  settled: number | false,
+): number | false {
+  return backoffRefetchInterval(query, query.state.dataUpdatedAt, !!query.state.data?.checksIncomplete, settled);
+}
+
+const failedAnswerStreaks = new WeakMap<object, { answeredAt: number; count: number }>();
+
+// backoffRefetchInterval polls 5s, 10s, 20s… up to 60s after consecutive
+// failed answers, so a struggling apiserver isn't asked more often the longer
+// it struggles; answeredAt identifies an answer, since React Query asks for
+// the interval more than once per fetch.
+export function backoffRefetchInterval(query: object, answeredAt: number, failing: boolean, settled: number | false): number | false {
+  const previous = failedAnswerStreaks.get(query) ?? { answeredAt: 0, count: 0 };
+  const streak = answeredAt === previous.answeredAt ? previous : { answeredAt, count: failing ? previous.count + 1 : 0 };
+  failedAnswerStreaks.set(query, streak);
+  if (!failing || streak.count === 0) return settled;
+  return Math.min(5000 * 2 ** (streak.count - 1), 60_000);
 }
 
 // ============================================================================
@@ -2484,12 +2596,14 @@ export function useNamespaceCapabilities(
   globalCaps: Capabilities | undefined,
 ) {
   const needsCheck = namespace && globalCaps;
+  const connected = useClusterConnected();
   return useQuery<Capabilities>({
     queryKey: ["capabilities", namespace],
     queryFn: () =>
       fetchJSON(`/capabilities?namespace=${encodeURIComponent(namespace!)}`),
     enabled: !!needsCheck,
     staleTime: 60000,
+    refetchInterval: (query) => connected ? capabilitiesRefetchInterval(query, false) : false,
   });
 }
 
@@ -2610,11 +2724,24 @@ export function useCanHelmAct(namespace?: string): { allowed: boolean; reason?: 
 
 // Namespaces
 export function useNamespaces() {
+  const connected = useClusterConnected();
   return useQuery<Namespace[]>({
     queryKey: ["namespaces"],
     queryFn: () => fetchJSON("/namespaces"),
     staleTime: 30000, // 30 seconds
+    refetchInterval: (query) => namespacesRefetchInterval(query, connected),
   });
+}
+
+// A 5xx is a list Radar couldn't read (a timed-out LIST or access check), not
+// an empty one; ask again (backing off) until it answers. A denial won't
+// change by polling, and while the cluster is disconnected reconnecting
+// refreshes every query anyway.
+export function namespacesRefetchInterval(query: { state: { status: string; error: unknown; dataUpdatedAt: number; errorUpdatedAt: number } }, connected = true): number | false {
+  if (!connected) return false;
+  const { status, error, dataUpdatedAt, errorUpdatedAt } = query.state;
+  const failing = status === "error" && error instanceof ApiError && error.status >= 500;
+  return backoffRefetchInterval(query, Math.max(dataUpdatedAt, errorUpdatedAt), failing, false);
 }
 
 // Topology (for manual refresh)
@@ -3917,6 +4044,11 @@ export interface PrometheusResourceMetrics {
   // controller ownership. podsTotal is the full set when the cap cut the list.
   pods?: number;
   podsTotal?: number;
+  // How the query was kept to this cluster in a shared metrics store; when it
+  // withholds, result has no series. Older Radar omits it.
+  clusterScope?: ClusterScope;
+  // The store answered only partly: drawn, but samples may be missing.
+  partial?: boolean;
 }
 
 export type PrometheusMetricCategory =
@@ -3936,72 +4068,10 @@ export interface PrometheusPVCUsage {
   hasData: boolean;
 }
 
-export type RightsizingFit =
-  | "balanced"
-  | "oversized"
-  | "under_requested"
-  | "missing_request"
-  | "insufficient_history"
-  | "pod_level_request";
-export type RightsizingConfidence = "low" | "medium" | "high";
-export type RightsizingOwnerCoverage = "ksm_history" | "current_pods";
-
-export interface RightsizingRow {
-  container: string;
-  resource: "cpu" | "memory";
-  fit: RightsizingFit;
-  confidence: RightsizingConfidence;
-  currentRequest?: string;
-  currentRequestValue?: number;
-  currentLimit?: string;
-  currentLimitValue?: number;
-  /** The pod's fixed pod-level request (spec.resources), set when fit is pod_level_request. */
-  podLevelRequest?: string;
-  podLevelRequestValue?: number;
-  observed?: {
-    name: "P95" | "P99" | "Max";
-    value: number;
-    formatted: string;
-  };
-  peak?: {
-    name: "P99";
-    value: number;
-    formatted: string;
-  };
-  calculatedRequest?: string;
-  calculatedRequestValue?: number;
-  recommendedRequest?: string;
-  recommendedRequestValue?: number;
-  reductionLimited?: boolean;
-  bursty?: boolean;
-  recommendationReason?: string;
-  sampleCount: number;
-  expectedSamples: number;
-  coverage: number;
-  hpaManaged: boolean;
-  hpaEvidenceAvailable: boolean;
-  throttleAvailable?: boolean;
-  throttleRatio?: number;
-  currentPodOOM?: boolean;
-  windowOomEvidence?: boolean;
-  oomEvidenceAvailable: boolean;
-  /** The cluster cache would not list the workload's pods, so currentPodOOM is unknown rather than false. */
-  liveInventoryUnavailable?: boolean;
-  limitConflict?: boolean;
-  queryError?: string;
-}
-
-export interface PrometheusRightsizing {
-  kind: string;
-  namespace: string;
-  name: string;
-  window: string;
-  source: "radar";
-  ownerCoverage: RightsizingOwnerCoverage;
-  scaledToZero: boolean;
-  sampleAvailable: boolean;
-  rows: RightsizingRow[];
-  reason?: string;
+export type { RightsizingRow, RightsizingFit, RightsizingConfidence, RightsizingOwnerCoverage } from '@skyhook-io/k8s-ui/types/rightsizing'
+export interface PrometheusRightsizing extends WorkloadRightsizingEvidence {
+  source: "radar"
+  clusterScope?: ClusterScope;
 }
 
 export type RightsizingScanState = "complete" | "partial" | "unavailable";
@@ -4012,6 +4082,7 @@ export interface RightsizingScanWorkload {
   name: string;
   replicas: number;
   scaledToZero: boolean;
+  managedBy?: WorkloadRightsizingEvidence["managedBy"];
   rows: RightsizingRow[];
 }
 
@@ -4039,9 +4110,12 @@ export interface RightsizingScanResponse {
   window: string;
   source: "radar";
   coverage: RightsizingScanCoverage;
-  workloads: RightsizingScanWorkload[];
+  /** Older spokes return null when a scan loses its Prometheus connection. */
+  workloads: RightsizingScanWorkload[] | null;
   warnings?: { code: string; message: string }[];
   reason?: string;
+  /** Absent from older Radar. A withheld scope means no workload was measured. */
+  clusterScope?: ClusterScope;
 }
 
 // Poll quickly while a discovery run is in flight so the flip to connected
@@ -4323,9 +4397,10 @@ export function usePrometheusRightsizing(
   enabled = true,
 ) {
   return useQuery<PrometheusRightsizing>({
-    queryKey: ["prometheus-rightsizing", kind, namespace, name],
-    queryFn: () =>
-      fetchJSON(`/prometheus/rightsizing/${kind}/${namespace}/${name}`),
+    queryKey: ["prometheus-rightsizing", getApiBase(), kind, namespace, name],
+    queryFn: ({ signal }) =>
+      fetchJSON(`/prometheus/rightsizing/${kind}/${namespace}/${name}`, signal),
+    retry: (count, error) => !isForbiddenError(error) && count < 1,
     enabled: enabled && Boolean(kind && namespace && name),
     staleTime: 5 * 60 * 1000,
     refetchInterval: 10 * 60 * 1000,
@@ -4423,6 +4498,8 @@ export interface PrometheusHPAMetrics {
   range: string;
   current: PrometheusQueryResult;
   desired: PrometheusQueryResult;
+  clusterScope?: ClusterScope;
+  partial?: boolean;
 }
 
 export function usePrometheusHPAMetrics(
@@ -4743,7 +4820,10 @@ function deleteResourceNotification(result: DeleteResourceResult): { message: st
   return { message: "Resource deleted", type: "success" };
 }
 
-export function useDeleteResource() {
+export function useDeleteResource(options?: {
+  /** Runs after any outcome, even when the caller unmounted meanwhile. */
+  onSettled?: () => void;
+}) {
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -4753,12 +4833,17 @@ export function useDeleteResource() {
       namespace,
       name,
       force,
+      uid,
+      resourceVersion,
     }: {
       kind: string;
       group?: string;
       namespace: string;
       name: string;
       force?: boolean;
+      /** Delete only the object reviewed: a Radar with resourceDeletePreconditions answers 409 when it changed. */
+      uid?: string;
+      resourceVersion?: string;
     }) => {
       const url = new URL(
         apiUrl(`/resources/${resourcePathSegments(kind, namespace, name)}`),
@@ -4770,6 +4855,8 @@ export function useDeleteResource() {
       if (force) {
         url.searchParams.set("force", "true");
       }
+      if (uid) url.searchParams.set("uid", uid);
+      if (resourceVersion) url.searchParams.set("resourceVersion", resourceVersion);
       return readDeleteResult(apiFetch(url.toString(), { method: "DELETE" }));
     },
     meta: {
@@ -4787,6 +4874,7 @@ export function useDeleteResource() {
       });
       queryClient.invalidateQueries({ queryKey: ["topology"] });
     },
+    onSettled: () => options?.onSettled?.(),
   });
 }
 
@@ -5276,15 +5364,23 @@ export function useTriggerCronJob() {
     mutationFn: async ({
       namespace,
       name,
+      jobName,
     }: {
       namespace: string;
       name: string;
+      // Only for a Radar advertising cronJobTriggerJobName; an older one
+      // ignores the body and names the Job itself.
+      jobName?: string;
     }) => {
       const response = await apiFetch(
         `${getApiBase()}/cronjobs/${namespace}/${name}/trigger`,
-        {
-          method: "POST",
-        },
+        jobName
+          ? {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ jobName }),
+            }
+          : { method: "POST" },
       );
       if (!response.ok) {
         const error = await readErrorBody(response);
@@ -6655,12 +6751,9 @@ function streamHelmProgress(
   onProgress: (event: InstallProgressEvent) => void,
   failureLabel: string,
 ): Promise<InstallProgressEvent> {
-  const headers = new Headers(options.headers);
-  for (const [k, v] of Object.entries(getAuthHeaders())) {
-    if (!headers.has(k)) headers.set(k, v);
-  }
   return new Promise((resolve, reject) => {
-    fetch(url, { credentials: getCredentialsMode(), ...options, headers })
+    // apiFetch adds the auth headers and the tab's connection.
+    apiFetch(url, options)
       .then(async (response) => {
         if (!response.ok) {
           const error = await readErrorBody(response);
@@ -7581,9 +7674,6 @@ export async function fetchSessionCounts(): Promise<SessionCounts> {
   return fetchJSON("/sessions");
 }
 
-// Context switch timeout in milliseconds (should be longer than backend timeout)
-const CONTEXT_SWITCH_TIMEOUT = 45000; // 45 seconds
-
 // Switch to a different context
 // A refused context switch. errorType is set when the server checked the new
 // cluster before leaving the current one and it didn't answer; older Radar
@@ -7601,50 +7691,52 @@ export class SwitchContextError extends Error {
 export function useSwitchContext() {
   const queryClient = useQueryClient();
 
-  return useMutation<ClusterInfo, Error, { name: string }>({
+  return useMutation<ContextSwitchOperation | null, Error, { name: string }>({
     mutationFn: async ({ name }) => {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(
-        () => controller.abort(),
-        CONTEXT_SWITCH_TIMEOUT,
-      );
-
+      const base = getApiBase();
+      const path = apiUrl(`/contexts/${encodeURIComponent(name)}?track=1`, base);
+      const previous = queryClient.getQueryData<{ contextSwitch?: ContextSwitchOperation }>(["connection-status"]);
       try {
-        const response = await apiFetch(
-          `${getApiBase()}/contexts/${encodeURIComponent(name)}`,
-          {
-            method: "POST",
-            signal: controller.signal,
-          },
-        );
-        clearTimeout(timeoutId);
-
+        // This deadline bounds the acknowledgement, not the accepted operation.
+        const response = await apiFetch(path, { method: "POST", signal: AbortSignal.timeout(45_000) });
         if (!response.ok) {
           const error = await readErrorBody(response);
-          throw new SwitchContextError(
-            error.error || `HTTP ${response.status}`,
-            typeof error.errorType === "string" ? error.errorType : undefined,
-          );
+          throw new SwitchContextError(error.error || `HTTP ${response.status}`, typeof error.errorType === "string" ? error.errorType : undefined);
         }
-        return response.json();
+        // Cloud-managed and older servers finish the switch before returning 200.
+        return response.status === 202 ? await response.json() as ContextSwitchOperation : null;
       } catch (error) {
-        clearTimeout(timeoutId);
-        if (error instanceof Error && error.name === "AbortError") {
-          throw new Error(
-            "Context switch timed out. The cluster may be unreachable.",
-            {
-              cause: error,
-            },
-          );
+        if (error instanceof SwitchContextError) throw error;
+        // Either the headers or the body can be lost after the server starts.
+        const status = await apiFetch(apiUrl("/connection?contexts=0", base), { signal: AbortSignal.timeout(10_000) }).catch(() => undefined);
+        if (status?.ok) {
+          const { contextSwitch } = await status.json() as { contextSwitch?: ContextSwitchOperation };
+          if (contextSwitch?.target === name && (switchInProgress(contextSwitch) || (previous && contextSwitch.id !== previous.contextSwitch?.id))) {
+            return contextSwitch;
+          }
+        }
+        if (error instanceof Error && error.name === "TimeoutError") {
+          throw new Error("Radar did not acknowledge the switch. Check the connection status before trying again.", { cause: error });
         }
         throw error;
       }
     },
-    onSuccess: () => {
-      // Clear all query cache to ensure fresh data from new context
-      // Using removeQueries + invalidateQueries ensures no stale data is served
-      queryClient.removeQueries();
-      queryClient.invalidateQueries();
+    onSuccess: async (operation) => {
+      if (operation) {
+        // A late acknowledgement of a switch this tab already showed the outcome
+        // of carries an older snapshot; seeding it would reopen the overlay.
+        if (switchFinished(operation.id)) return;
+        followSwitch(operation.id);
+        await queryClient.cancelQueries({ queryKey: ["connection-status"] });
+        if (switchInProgress(operation)) {
+          queryClient.setQueryData(["connection-status"], (existing: { contextSwitch?: ContextSwitchOperation } | undefined) =>
+            existing ? { ...existing, contextSwitch: operation } : existing);
+        }
+        void queryClient.invalidateQueries({ queryKey: ["connection-status"] });
+      } else {
+        queryClient.removeQueries();
+        void queryClient.invalidateQueries();
+      }
     },
     onError: () => {
       // Invalidate contexts so the dropdown checkmark reflects the backend's
@@ -7692,7 +7784,31 @@ export interface NamespaceScope {
   cacheScopeNamespace?: string;
   /** true when this client may rebuild the local cache for another namespace. */
   namespaceRescope: boolean;
+  /**
+   * The server's namespace LIST failed for a reason other than RBAC (e.g. a
+   * timeout right after a context switch), so accessibleNamespaces is only
+   * its short fallback list. Absent from older servers.
+   */
+  listFailed?: boolean;
+  /** Where Radar collects the kinds it keeps in only some namespaces; absent when none, or from an older Radar. */
+  collection?: NamespaceCollection;
 }
+
+/**
+ * A failed namespace list is retried rather than kept as the answer: 3s after
+ * the first failure, doubling to 30s so a list that keeps failing doesn't add
+ * load to an apiserver that is already struggling.
+ */
+export function namespaceScopeRefetchInterval(
+  scope: Pick<NamespaceScope, "listFailed"> | undefined,
+  consecutiveFailures: number,
+): number | false {
+  if (!scope?.listFailed) return false;
+  return Math.min(3000 * 2 ** Math.max(0, consecutiveFailures - 1), 30000);
+}
+
+// Consecutive listFailed answers per apiBase, for the back-off above.
+const namespaceListFailures = new Map<string, number>();
 
 export function useNamespaceScope() {
   return useQuery<NamespaceScope>({
@@ -7700,9 +7816,12 @@ export function useNamespaceScope() {
     queryFn: async ({ signal }) => {
       const apiBase = getApiBase();
       const scope = await fetchJSON<NamespaceScope>("/cluster/namespace-scope", signal);
+      namespaceListFailures.set(apiBase, scope.listFailed ? (namespaceListFailures.get(apiBase) ?? 0) + 1 : 0);
       return applyTabPick(scope, apiBase);
     },
     staleTime: 30000,
+    refetchInterval: (query) =>
+      namespaceScopeRefetchInterval(query.state.data, namespaceListFailures.get(getApiBase()) ?? 0),
   });
 }
 
@@ -8350,6 +8469,7 @@ export interface DiagnosticsSnapshot {
     clusterName?: string;
     error?: string;
     errorType?: string;
+    progressMessage?: string;
   };
   kubeconfig?: {
     mode: "" | "in-cluster" | "single" | "multi-env" | "multi-dir" | "multi-source";
@@ -8359,11 +8479,12 @@ export interface DiagnosticsSnapshot {
     enrichedFromShell: boolean;
     kubeconfigEnvIgnored: boolean;
     kubeconfigEnvIgnoredReason: string;
-    currentContextUsesExec: boolean;
+    currentContextUsesExec?: boolean;
     execPluginsPresent?: string[];
     execPluginsMissing?: string[];
   };
   cluster?: {
+    observedAt?: string;
     platform: string;
     kubernetesVersion: string;
     nodeCount: number;
@@ -8401,7 +8522,7 @@ export interface DiagnosticsSnapshot {
   };
   informers?: {
     typedCount: number;
-    dynamicCount: number;
+    dynamicCount?: number;
     watchedCRDs: string[];
     syncStatus?: DiagCacheSyncStatus;
   };
@@ -8473,7 +8594,30 @@ export interface DiagnosticsSnapshot {
 export function useDiagnostics(enabled: boolean) {
   return useQuery<DiagnosticsSnapshot>({
     queryKey: ["diagnostics"],
-    queryFn: enabled ? () => fetchJSON("/diagnostics") : skipToken,
+    queryFn: enabled
+      ? async ({ signal }) => {
+          const request = new AbortController();
+          const cancel = () => request.abort();
+          signal.addEventListener("abort", cancel, { once: true });
+          if (signal.aborted) cancel();
+          const timeout = setTimeout(cancel, 15000);
+          try {
+            return await fetchJSON<DiagnosticsSnapshot>("/diagnostics", request.signal);
+          } catch (error) {
+            if (request.signal.aborted && !signal.aborted) {
+              throw new Error("Radar did not return diagnostics within 15 seconds.", { cause: error });
+            }
+            if (signal.aborted) throw error;
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error(`Could not load diagnostics. ${message}`, { cause: error });
+          } finally {
+            clearTimeout(timeout);
+            signal.removeEventListener("abort", cancel);
+          }
+        }
+      : skipToken,
+    retry: false,
+    networkMode: "always",
     staleTime: 0,
     gcTime: 0,
   });

@@ -104,6 +104,9 @@ func RunFromCache(cache *k8s.ResourceCache, namespaces []string, opts *RunOption
 	input.PDPlacement = collectPDPlacement(cache, namespaces, scope)
 
 	results := bp.RunChecks(input)
+	if cache.CustomResourcesPending() {
+		results.MissingInputs = append(results.MissingInputs, "custom resources")
+	}
 	if !hasCompleteSecretInput(cache, namespaces, scope) && !slices.Contains(results.MissingInputs, "secrets") {
 		results.MissingInputs = append(results.MissingInputs, "secrets")
 	}
@@ -189,7 +192,7 @@ func listCrossplaneDynamic(namespaces []string, scope *ReadScope) (mrs, xrs []*u
 		if gvr.Group == "pkg.crossplane.io" || gvr.Group == "apiextensions.crossplane.io" {
 			continue
 		}
-		items, err := cache.ListWatched(gvr)
+		items, err := cache.ListWatchedReadOnly(gvr)
 		if err != nil {
 			if !apierrors.IsForbidden(err) && !apierrors.IsUnauthorized(err) {
 				log.Printf("[audit] Crossplane scan: skipping %s/%s: %v", gvr.GroupResource(), gvr.Version, err)
@@ -253,7 +256,7 @@ func listCNPGDynamic(namespaces []string) (clusters, scheduledBackups []*unstruc
 	}
 
 	list := func(gvr schema.GroupVersionResource) []*unstructured.Unstructured {
-		items, err := cache.ListWatched(gvr)
+		items, err := cache.ListWatchedReadOnly(gvr)
 		if err != nil {
 			if !apierrors.IsForbidden(err) && !apierrors.IsUnauthorized(err) {
 				log.Printf("[audit] CNPG scan: skipping %s: %v", gvr.GroupResource(), err)
@@ -339,7 +342,7 @@ func listTraefikDynamic(namespaces []string) (routes, middlewares, traefikServic
 		if kind == "" {
 			continue // not a kind the checks read
 		}
-		items, err := cache.ListWatched(gvr)
+		items, err := cache.ListWatchedReadOnly(gvr)
 		if err != nil {
 			if !apierrors.IsForbidden(err) && !apierrors.IsUnauthorized(err) {
 				log.Printf("[audit] Traefik scan: skipping %s/%s: %v", gvr.GroupResource(), gvr.Version, err)
@@ -521,7 +524,7 @@ func gitOpsRoots() (present bool, argoAppNames map[string]struct{}) {
 		if !ok {
 			return nil
 		}
-		items, err := dc.ListWatched(gvr)
+		items, err := dc.ListWatchedReadOnly(gvr)
 		if err != nil {
 			return nil
 		}

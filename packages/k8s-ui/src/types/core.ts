@@ -154,6 +154,9 @@ export interface Capabilities {
   // Which Cloud-connect lane this deployment gets. Optional on the wire:
   // older backends don't advertise it — consumers fall back to wizard links.
   cloudConnect?: CloudConnectCapability
+  // An access check errored, so a false above may be unanswered rather than
+  // denied. Older Radars never send it.
+  checksIncomplete?: boolean
 }
 
 // CloudConnectCapability picks the Cloud funnel's connect lane: 'driver'
@@ -171,6 +174,8 @@ export interface CloudConnectCapability {
 export interface FeatureCapabilities {
  helmSourceIdentity?: boolean
   helmInventory?: boolean
+  datadogRightsizing?: boolean
+  datadogAgentPresence?: boolean
   resourceReadCoverage?: boolean
   searchCoverage?: boolean
  applicationEvidence?: boolean
@@ -179,6 +184,7 @@ export interface FeatureCapabilities {
   yamlSchemas?: boolean
   workloadImages?: boolean
   deploymentPause?: boolean
+  substrateHealthMetrics?: boolean
   resourceIssues?: boolean
   resourceIssueCoverage?: boolean
   podEnvironment?: boolean
@@ -186,6 +192,19 @@ export interface FeatureCapabilities {
   workloadHistory?: boolean
   cnpgWorkspace?: boolean
   cnpgProtectionSetup?: boolean
+  veleroWorkspace?: boolean
+  /** POST /api/velero/schedules/{namespace}/{name}/backup */
+  veleroBackupNow?: boolean
+  /** POST /api/velero/schedules/{namespace}/{name}/{pause|resume} */
+  veleroSchedulePause?: boolean
+  /** GET /api/velero/runs/{backups|restores} */
+  veleroRuns?: boolean
+  /** POST /api/velero/backups/{namespace}/{name}/delete and GET .../deletion */
+  veleroDeleteBackup?: boolean
+  veleroRunArtifacts?: boolean
+  veleroRunVolumes?: boolean
+  /** DELETE /api/resources/... honours ?uid=&resourceVersion= preconditions */
+  resourceDeletePreconditions?: boolean
   gitopsWriteEvidence?: boolean
   agentSigninCheck?: boolean
   serviceEndpointSlices?: boolean
@@ -202,6 +221,12 @@ export interface FeatureCapabilities {
   podSidecarMarks?: boolean
   kueueQueueWorkloads?: boolean
   podFileUpload?: boolean
+  vulnerabilities?: boolean
+  vulnerabilitiesExport?: boolean // GET /api/vulnerabilities/export
+  runtimeAdvisoryChecks?: boolean
+  runtimeAdvisoryProgress?: boolean
+  sealedSecretsController?: boolean // GET /api/sealedsecrets/controller
+  cronJobTriggerJobName?: boolean
 }
 
 // DeploymentMode is the closed set of topologies Radar can run in.
@@ -219,7 +244,7 @@ export interface Deployment {
 //
 // When adding a new kind here, also update:
 // - ALL_NODE_KINDS in App.tsx
-// - resource-kind-colors.ts TOPOLOGY_RESOURCE_KINDS array
+// - TopologyFilterSidebar.tsx RESOURCE_KINDS array
 // - K8sResourceNode.tsx NODE_DIMENSIONS
 // - resource-icons.ts KIND_ICON_MAP
 // - kindToPlural in navigation.ts (if irregular plural)
@@ -669,6 +694,14 @@ export interface ResourceRef {
   namespace: string
   name: string
   group?: string  // API group for CRDs (e.g., 'cert-manager.io')
+  /**
+   * Set when the subject's own spec names this object but the viewer may not
+   * read it ('denied'), or Radar couldn't check the viewer's access
+   * ('access_unverified'). Only the name
+   * is known: not whether it exists, nor its state. Absent means no qualifier
+   * was recorded, not that the object exists.
+   */
+  state?: 'denied' | 'access_unverified'
 }
 
 // Computed relationships for a resource
@@ -1656,7 +1689,7 @@ export interface TrafficFlow {
    *  measures a rate rather than observing individual responses, so it has a
    *  status code for no single flow. */
   errorRate?: number
-  verdict: string // forwarded, dropped, error
+  verdict: string // forwarded, dropped, error; empty when the source reports none
   /** The network plugin's own account of which policies decided this flow
    *  (Hubble reports it). Absent when the plugin said nothing. */
   policyVerdict?: {
@@ -1693,6 +1726,8 @@ export interface AggregatedFlow {
   protocol: string
   port: number
   flowCount: number
+  bytesByProtocol?: Record<string, { bytesSent: number; bytesRecv: number }>
+  /** Cross-protocol sums kept for compatibility; display the breakdown when present. */
   bytesSent: number
   bytesRecv: number
   connections: number

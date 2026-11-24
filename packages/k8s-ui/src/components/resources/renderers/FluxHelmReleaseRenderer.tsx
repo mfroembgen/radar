@@ -2,11 +2,12 @@ import type { ReactNode } from 'react'
 import { Package, Settings, CheckCircle2, History, FileCode2, GitBranch } from 'lucide-react'
 import { clsx } from 'clsx'
 import { Section, PropertyList, Property, ConditionsSection, ProblemAlerts, ResourceLink } from '../../ui/drawer-components'
-import { GitOpsStatusBadge, SyncCountdown } from '../../gitops'
-import { fluxConditionsToGitOpsStatus, type FluxCondition } from '../../../types/gitops'
+import { GitOpsStatusBadge, ManagedResourcesList, SyncCountdown } from '../../gitops'
+import { fluxConditionsToGitOpsStatus, parseFluxInventory, type FluxCondition } from '../../../types/gitops'
 import { TimeValue } from '../../ui/ScheduleValue'
 import { getFluxDeployedRelease, getFluxHandledRequestToken, getFluxReleaseAttemptTime } from '../../../utils/flux-history'
 import { Tooltip } from '../../ui/Tooltip'
+import { Badge } from '../../ui/Badge'
 
 export interface FluxValuesReference {
   kind?: 'ConfigMap' | 'Secret'
@@ -28,6 +29,7 @@ export function FluxHelmReleaseRenderer({ data, onNavigate, renderValuesReferenc
   const conditions = (status.conditions || []) as FluxCondition[]
   const history = status.history || []
   const handledRequest = getFluxHandledRequestToken(status)
+  const managedResources = parseFluxInventory(status.inventory?.entries || [])
 
   // Convert to unified GitOps status
   const gitOpsStatus = fluxConditionsToGitOpsStatus(conditions, spec.suspend === true, {
@@ -84,6 +86,7 @@ export function FluxHelmReleaseRenderer({ data, onNavigate, renderValuesReferenc
   const sourceRef = chartRef.sourceRef || {}
 
   const lastRelease = getFluxDeployedRelease(data)
+  const deployedRevision = lastRelease?.chartVersion || status.lastAppliedRevision
 
   return (
     <>
@@ -276,6 +279,13 @@ export function FluxHelmReleaseRenderer({ data, onNavigate, renderValuesReferenc
         </Section>
       )}
 
+      {managedResources.length > 0 && (
+        <ManagedResourcesList
+          resources={managedResources}
+          title="Inventory"
+        />
+      )}
+
       {/* History is low priority when the deployed release is shown above. */}
       {(history.length > 1 || (history.length === 1 && !lastRelease)) && (
         <Section title={`History (${history.length} ${history.length === 1 ? 'revision' : 'revisions'})`} icon={History} defaultExpanded={!lastRelease}>
@@ -330,7 +340,7 @@ export function FluxHelmReleaseRenderer({ data, onNavigate, renderValuesReferenc
 
       {/* Revision info */}
       {(status.helmChart || status.lastAppliedRevision || status.lastAttemptedRevision || handledRequest) && (
-        <Section title="Revision Info" defaultExpanded={false}>
+        <Section title="Revision Info" defaultExpanded={true}>
           <PropertyList>
             {status.helmChart && (
               <Property label="Helm Chart" value={status.helmChart} />
@@ -339,7 +349,7 @@ export function FluxHelmReleaseRenderer({ data, onNavigate, renderValuesReferenc
               <Property label="Applied Revision" value={status.lastAppliedRevision} />
             )}
             {status.lastAttemptedRevision && (
-              <Property label="Attempted Revision" value={status.lastAttemptedRevision} />
+              <Property label="Attempted Revision" value={<><span className="break-words">{status.lastAttemptedRevision}</span>{deployedRevision && deployedRevision !== status.lastAttemptedRevision && <> <Badge severity="warning" size="sm">not the last successful apply</Badge></>}</>} />
             )}
             <Property label="Last handled manual request" value={handledRequest} />
           </PropertyList>

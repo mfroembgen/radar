@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ import (
 	cnpgsvc "github.com/skyhook-io/radar/internal/cnpg"
 	integration "github.com/skyhook-io/radar/internal/integration"
 	"github.com/skyhook-io/radar/internal/k8s"
+	"github.com/skyhook-io/radar/internal/settings"
 	"github.com/skyhook-io/radar/pkg/k8score"
 	"github.com/skyhook-io/radar/pkg/topology"
 )
@@ -68,6 +70,24 @@ func seedCNPGWorkspace(t *testing.T, kinds []k8s.APIResource, objs ...runtime.Ob
 		t.Fatalf("seed cnpg: %v", err)
 	}
 	t.Cleanup(k8s.ResetTestDynamicState)
+}
+
+func seedSyncedCNPGWorkspace(t *testing.T, kinds []k8s.APIResource, objs ...runtime.Object) {
+	t.Helper()
+	seedCNPGWorkspace(t, kinds, objs...)
+	dc := k8s.GetDynamicResourceCache()
+	for _, k := range kinds {
+		gvr := schema.GroupVersionResource{Group: k.Group, Version: k.Version, Resource: k.Name}
+		if err := dc.EnsureWatching(gvr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, k := range kinds {
+		gvr := schema.GroupVersionResource{Group: k.Group, Version: k.Version, Resource: k.Name}
+		if !dc.WaitForSync(gvr, 5*time.Second) {
+			t.Fatalf("%s did not sync", gvr)
+		}
+	}
 }
 
 func cnpgObj(apiVersion, kind, ns, name string, spec, status map[string]any) *unstructured.Unstructured {
@@ -227,7 +247,7 @@ func TestCNPGWorkspace_ManagedByFromObjectMetadata(t *testing.T) {
 	pooler.SetLabels(map[string]string{"kustomize.toolkit.fluxcd.io/name": "databases", "kustomize.toolkit.fluxcd.io/namespace": "flux-system"})
 	sched := cnpgObj("postgresql.cnpg.io/v1", "ScheduledBackup", "db", "nightly", map[string]any{"cluster": map[string]any{"name": "pg"}, "schedule": "0 0 2 * * *"}, nil)
 	sched.SetLabels(map[string]string{"app.kubernetes.io/name": "pg"})
-	seedCNPGWorkspace(t, cnpgWorkspaceTestKinds, cluster, database, pooler, sched)
+	seedSyncedCNPGWorkspace(t, cnpgWorkspaceTestKinds, cluster, database, pooler, sched)
 
 	got := getWorkspaceNoAuth(t, "")
 	want := map[string]topology.ResourceRef{
@@ -293,7 +313,7 @@ func TestCNPGWorkspace_AuthDisabledReturnsEverythingAndOnlyOwnedInstancePods(t *
 }
 
 func TestCNPGWorkspace_CollidingKindsNeverLeak(t *testing.T) {
-	seedCNPGWorkspace(t, cnpgWorkspaceTestKinds,
+	seedSyncedCNPGWorkspace(t, cnpgWorkspaceTestKinds,
 		cnpgObj("postgresql.cnpg.io/v1", "Cluster", "pgws", "pg-orders", nil, nil),
 		cnpgBackup("pgws", "pg-orders-b1", "pg-orders", "running", time.Time{}),
 		cnpgObj("velero.io/v1", "Backup", "pgws", "velero-nightly", nil, map[string]any{"phase": "Completed"}),
@@ -428,7 +448,7 @@ func TestCNPGWorkspace_ClusterImageCatalogNeedsClusterScopeGrant(t *testing.T) {
 }
 
 func TestCNPGWorkspace_BackupsOmittedIsReported(t *testing.T) {
-	seedCNPGWorkspace(t, cnpgWorkspaceTestKinds,
+	seedSyncedCNPGWorkspace(t, cnpgWorkspaceTestKinds,
 		cnpgBackup("pgws", "new", "orders", "completed", time.Now().Add(-time.Hour)),
 		cnpgBackup("pgws", "ancient", "orders", "completed", time.Now().Add(-30*24*time.Hour)),
 	)
@@ -438,10 +458,17 @@ func TestCNPGWorkspace_BackupsOmittedIsReported(t *testing.T) {
 	}
 }
 
-func TestCNPGWorkspace_AuditNeedsScheduledBackupEvidence(t *testing.T) {
+// Every CNPG Cluster rule reaches the workspace for every visible Cluster;
+// only the schedule rule needs the ScheduledBackup list, so a caller who
+// can't read it loses that finding and nothing else.
+func TestCNPGWorkspace_AuditCoversEveryClusterRule(t *testing.T) {
+	inTree := func() map[string]any {
+		return map[string]any{"instances": int64(1), "backup": map[string]any{"barmanObjectStore": map[string]any{"destinationPath": "s3://b"}}}
+	}
 	seedCNPGWorkspace(t, cnpgWorkspaceTestKinds,
-		cnpgObj("postgresql.cnpg.io/v1", "Cluster", "pg", "unscheduled", nil, nil),
-		cnpgObj("postgresql.cnpg.io/v1", "Cluster", "pg", "scheduled", nil, nil),
+		cnpgObj("postgresql.cnpg.io/v1", "Cluster", "pg", "unscheduled", inTree(), nil),
+		cnpgObj("postgresql.cnpg.io/v1", "Cluster", "pg", "scheduled", inTree(), nil),
+		cnpgObj("postgresql.cnpg.io/v1", "Cluster", "pg", "bare", nil, nil),
 		cnpgObj("postgresql.cnpg.io/v1", "ScheduledBackup", "pg", "nightly", map[string]any{"cluster": map[string]any{"name": "scheduled"}}, nil),
 	)
 	env := newAuthTestServer(t)
@@ -455,21 +482,57 @@ func TestCNPGWorkspace_AuditNeedsScheduledBackupEvidence(t *testing.T) {
 		allow(perms, cnpgsvc.Group, "scheduledbackups", "pg", u.sched)
 		env.srv.permCache.Set(u.name, nil, perms)
 	}
+	findings := func(audit []cnpgsvc.CNPGWorkspaceAuditFinding) []string {
+		var out []string
+		for _, f := range audit {
+			out = append(out, f.Name+":"+f.CheckID)
+		}
+		sort.Strings(out)
+		return out
+	}
+	posture := []string{
+		"bare:cnpgNoBackupDestination", "bare:cnpgSingleInstance",
+		"scheduled:cnpgInTreeBackupDeprecated", "scheduled:cnpgSingleInstance",
+		"unscheduled:cnpgInTreeBackupDeprecated", "unscheduled:cnpgSingleInstance",
+	}
 
 	got := decodeWorkspace(t, env.authGet(t, "/api/cnpg/workspace", "sees-schedules", ""))
-	if len(got.Audit) != 1 || got.Audit[0].Name != "unscheduled" || got.Audit[0].CheckID != "cnpgNoDeclarativeBackup" {
-		t.Errorf("audit = %+v, want one %s finding on unscheduled", got.Audit, "cnpgNoDeclarativeBackup")
+	want := append([]string{"unscheduled:cnpgNoDeclarativeBackup"}, posture...)
+	sort.Strings(want)
+	if g := findings(got.Audit); strings.Join(g, " ") != strings.Join(want, " ") {
+		t.Errorf("audit = %v\nwant    %v", g, want)
 	}
 
 	got = decodeWorkspace(t, env.authGet(t, "/api/cnpg/workspace", "no-schedules", ""))
 	if got.Coverage["scheduledBackups"].State != integration.KindCoverageDenied {
 		t.Errorf("scheduledBackups coverage = %+v, want denied", got.Coverage["scheduledBackups"])
 	}
-	if len(got.Audit) != 0 {
-		t.Errorf("audit = %+v, want none — without the ScheduledBackup list the absence is unestablished", got.Audit)
+	if g := findings(got.Audit); strings.Join(g, " ") != strings.Join(posture, " ") {
+		t.Errorf("audit = %v\nwant    %v — without the ScheduledBackup list only the schedule rule is unestablished", g, posture)
 	}
 }
 
+// The workspace shows the same CNPG findings as Checks: a check disabled in
+// the audit settings, or a namespace they ignore, leaves the workspace too.
+func TestCNPGWorkspace_AuditFollowsAuditSettings(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if _, err := settings.Update(func(s *settings.Settings) {
+		s.Audit = &settings.AuditConfig{DisabledChecks: []string{"cnpgSingleInstance"}, IgnoredNamespaces: []string{"scratch"}}
+	}); err != nil {
+		t.Fatalf("settings.Update: %v", err)
+	}
+	seedSyncedCNPGWorkspace(t, cnpgWorkspaceTestKinds,
+		cnpgObj("postgresql.cnpg.io/v1", "Cluster", "pg", "bare", nil, nil),
+		cnpgObj("postgresql.cnpg.io/v1", "Cluster", "scratch", "tmp", nil, nil),
+	)
+	var got []string
+	for _, f := range getWorkspaceNoAuth(t, "").Audit {
+		got = append(got, f.Namespace+"/"+f.Name+":"+f.CheckID)
+	}
+	if want := []string{"pg/bare:cnpgNoBackupDestination"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("audit = %v, want %v", got, want)
+	}
+}
 func withUID(u *unstructured.Unstructured, uid string) *unstructured.Unstructured {
 	u.SetUID(types.UID(uid))
 	return u
