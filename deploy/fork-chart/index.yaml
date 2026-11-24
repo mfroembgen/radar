@@ -1,0 +1,63 @@
+apiVersion: v1
+entries:
+  radar:
+  - annotations:
+      artifacthub.io/images: |
+        - name: radar
+          image: ghcr.io/mfroembgen/radar:1.21.2
+      artifacthub.io/license: Apache-2.0
+      artifacthub.io/links: |
+        - name: Website
+          url: https://radarhq.io
+        - name: Documentation
+          url: https://radarhq.io/docs
+        - name: Source
+          url: https://github.com/skyhook-io/radar
+        - name: Releases
+          url: https://github.com/skyhook-io/radar/releases
+        - name: Slack
+          url: https://radarhq.io/slack
+      artifacthub.io/maintainers: |
+        - name: Skyhook
+          email: support@skyhook.io
+      artifacthub.io/screenshots: |
+        - title: Multi-cluster topology
+          url: https://github.com/skyhook-io/radar/raw/main/docs/screenshots/topology-view.png
+        - title: Resource browser
+          url: https://github.com/skyhook-io/radar/raw/main/docs/screenshots/resources-view.png
+        - title: Event timeline
+          url: https://github.com/skyhook-io/radar/raw/main/docs/screenshots/timeline-view.png
+        - title: Service traffic map
+          url: https://github.com/skyhook-io/radar/raw/main/docs/screenshots/traffic-view.png
+      category: monitoring-logging
+    apiVersion: v2
+    appVersion: 1.21.2
+    created: "2026-11-24T13:06:03.504604+01:00"
+    description: Modern Kubernetes visibility - topology, traffic, Helm and GitOps
+      management
+    digest: 747b35357f3cd6a7a224cded299f5eb71abf016f2943a9fe5b33cb497d676579
+    home: https://radarhq.io
+    icon: https://radarhq.io/radar/icon-512.png
+    keywords:
+    - kubernetes
+    - kubernetes-dashboard
+    - kubernetes-ui
+    - kubernetes-monitoring
+    - visualization
+    - topology
+    - helm
+    - gitops
+    - mcp
+    maintainers:
+    - email: support@skyhook.io
+      name: Skyhook
+      url: https://radarhq.io
+    name: radar
+    sources:
+    - https://github.com/mfroembgen/radar/tree/ae639a40f4e01655f31ee8b22de934e252fc5169
+    - https://github.com/skyhook-io/radar
+    type: application
+    urls:
+    - radar-1.21.2.tgz
+    version: 1.21.2
+generated: "2026-11-24T13:06:03.502484+01:00"
