@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -22,15 +23,18 @@ const (
 type workOSFake struct {
 	t        *testing.T
 	key      *rsa.PrivateKey
+	kid      string
 	profile  string
 	userinfo int
+	jwks     int
 }
 
 func (f *workOSFake) RoundTrip(r *http.Request) (*http.Response, error) {
 	body := ""
 	switch r.URL.String() {
 	case testWorkOSIssuer + "/oauth2/jwks":
-		jwks, _ := json.Marshal(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &f.key.PublicKey, KeyID: "k1", Algorithm: "RS256", Use: "sig"}}})
+		f.jwks++
+		jwks, _ := json.Marshal(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{Key: &f.key.PublicKey, KeyID: f.kid, Algorithm: "RS256", Use: "sig"}}})
 		body = string(jwks)
 	case testWorkOSIssuer + "/oauth2/userinfo":
 		f.userinfo++
@@ -47,7 +51,7 @@ func newTestWorkOS(t *testing.T) (*WorkOSAuth, *workOSFake) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fake := &workOSFake{t: t, key: key, profile: `{"sub":"user_1","email":"Dev@Example.com","email_verified":true}`}
+	fake := &workOSFake{t: t, key: key, kid: "k1", profile: `{"sub":"user_1","email":"Dev@Example.com","email_verified":true}`}
 	a, err := newWorkOSAuth(WorkOSConfig{
 		AuthKitDomain: testWorkOSIssuer, PublicURL: testWorkOSPublic, AllowedEmailDomain: "example.com",
 		UsernamePrefix: "radar:google:", GroupsPrefix: "radar:google:", Paths: []string{"/mcp", "/mcp-readonly"},
@@ -72,7 +76,8 @@ func (f *workOSFake) token(t *testing.T, changes map[string]any) string {
 			claims[k] = v
 		}
 	}
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: f.key}, (&jose.SignerOptions{}).WithHeader("kid", "k1"))
+	options := (&jose.SignerOptions{}).WithHeader("kid", f.kid)
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: f.key}, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +135,7 @@ func TestWorkOSRejectsTokensBeforeUserinfo(t *testing.T) {
 		"machine subject": fake.token(t, map[string]any{"sub": "client_1"}),
 		"no session":      fake.token(t, map[string]any{"sid": nil}),
 		"no email scope":  fake.token(t, map[string]any{"scope": "openid"}),
-		"untrusted key":   (&workOSFake{t: t, key: other}).token(t, nil),
+		"untrusted key":   (&workOSFake{t: t, key: other, kid: "k1"}).token(t, nil),
 	}
 	for name, token := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -146,6 +151,48 @@ func TestWorkOSRejectsTokensBeforeUserinfo(t *testing.T) {
 	if fake.userinfo != 0 {
 		t.Fatalf("userinfo called %d times for invalid tokens", fake.userinfo)
 	}
+}
+
+func TestWorkOSFetchesKeysAtMostOncePerIntervalForUnknownKeys(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a, fake := newTestWorkOS(t)
+		other, _ := rsa.GenerateKey(rand.Reader, 2048)
+		unknownKey := (&workOSFake{t: t, key: other, kid: "k9"}).token(t, nil)
+		knownKeyForged := (&workOSFake{t: t, key: other, kid: "k1"}).token(t, nil)
+		for range 10 {
+			for _, token := range []string{unknownKey, knownKeyForged} {
+				if rec, seen := serveMCP(a, "/mcp", token); rec.Code != http.StatusUnauthorized || seen != nil {
+					t.Fatalf("status %d, want 401", rec.Code)
+				}
+			}
+		}
+		if rec, seen := serveMCP(a, "/mcp", fake.token(t, nil)); rec.Code != http.StatusOK || seen == nil {
+			t.Fatalf("status %d, want a valid token admitted from the cached keys", rec.Code)
+		}
+		if fake.jwks != 1 {
+			t.Fatalf("JWKS fetched %d times, want once per interval", fake.jwks)
+		}
+	})
+}
+
+func TestWorkOSVerifiesRotatedKeyAfterInterval(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a, fake := newTestWorkOS(t)
+		if rec, _ := serveMCP(a, "/mcp", fake.token(t, nil)); rec.Code != http.StatusOK {
+			t.Fatalf("status %d, want the current key admitted", rec.Code)
+		}
+		rotated, _ := rsa.GenerateKey(rand.Reader, 2048)
+		fake.key, fake.kid = rotated, "k2"
+		token := fake.token(t, nil)
+		time.Sleep(time.Minute - time.Second)
+		if rec, _ := serveMCP(a, "/mcp", token); rec.Code != http.StatusUnauthorized || fake.jwks != 1 {
+			t.Fatalf("status %d after %d JWKS fetches, want the new key refused until the interval passes", rec.Code, fake.jwks)
+		}
+		time.Sleep(2 * time.Second)
+		if rec, _ := serveMCP(a, "/mcp", token); rec.Code != http.StatusOK || fake.jwks != 2 {
+			t.Fatalf("status %d after %d JWKS fetches, want the rotated key admitted after one refetch", rec.Code, fake.jwks)
+		}
+	})
 }
 
 func TestWorkOSRejectsDisallowedProfiles(t *testing.T) {

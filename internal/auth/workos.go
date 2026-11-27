@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,13 +17,17 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	mcpauth "github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
+	"golang.org/x/time/rate"
 )
 
 // workOSScopes are the scopes every MCP access token must carry. Clients also
 // request offline_access so AuthKit issues refresh tokens.
 var workOSScopes = []string{"openid", "email"}
 
-const workOSProfileCacheLimit = 4096
+const (
+	workOSProfileCacheLimit  = 4096
+	workOSKeyRefreshInterval = time.Minute
+)
 
 // WorkOSAuth authenticates remote MCP callers with WorkOS AuthKit access
 // tokens. AuthKit owns client registration, sign-in, consent and refresh, so
@@ -89,7 +94,9 @@ func newWorkOSAuth(cfg WorkOSConfig, client *http.Client) (*WorkOSAuth, error) {
 		resources: make(map[string]*workOSResource), client: client,
 		profiles: make(map[[32]byte]workOSProfile),
 	}
-	keys := oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), client), a.issuer+"/oauth2/jwks")
+	keyClient := *client
+	keyClient.Transport = &workOSKeyRefreshLimit{base: client.Transport, limit: rate.NewLimiter(rate.Every(workOSKeyRefreshInterval), 1)}
+	keys := oidc.NewRemoteKeySet(oidc.ClientContext(context.Background(), &keyClient), a.issuer+"/oauth2/jwks")
 	for _, path := range cfg.Paths {
 		resource := public.String() + path
 		a.resources[path] = &workOSResource{
@@ -99,6 +106,18 @@ func newWorkOSAuth(cfg WorkOSConfig, client *http.Client) (*WorkOSAuth, error) {
 		}
 	}
 	return a, nil
+}
+
+type workOSKeyRefreshLimit struct {
+	base  http.RoundTripper
+	limit *rate.Limiter
+}
+
+func (l *workOSKeyRefreshLimit) RoundTrip(r *http.Request) (*http.Response, error) {
+	if !l.limit.Allow() {
+		return nil, errors.New("WorkOS key refresh rate limited")
+	}
+	return l.base.RoundTrip(r)
 }
 
 func workOSHTTPSURL(raw string) (*url.URL, error) {

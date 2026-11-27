@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: fork-image-1.21.2
+  group: fork-image-1.21.5
   cancel-in-progress: false
 
 permissions:
@@ -12,11 +12,11 @@ permissions:
   packages: write
 
 env:
-  SOURCE_SHA: ae639a40f4e01655f31ee8b22de934e252fc5169
-  UPSTREAM_RELEASE_SHA: 94b60427cdd067edaf46a64e3acb9c462712eef3
-  RELEASE_VERSION: 1.21.2
+  SOURCE_SHA: d6b8bcf3f356353d10dbe1b4bd5f1996db43d625
+  UPSTREAM_RELEASE_SHA: 44d73bf7e3e54e577b7d0c62de9c245d7fce5a1f
+  RELEASE_VERSION: 1.21.5
   DOCKER_REPO: ghcr.io/mfroembgen/radar
-  # No 1.21.2 image exists yet, so this build replaces none: any existing tag
+  # No 1.21.5 image exists yet, so this build replaces none: any existing tag
   # stops it.
   REPLACES_DIGEST: ''
 
